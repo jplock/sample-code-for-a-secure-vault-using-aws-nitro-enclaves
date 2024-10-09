@@ -208,7 +208,7 @@ Resources:
                 memory_mib: 4096
                 #
                 # How many CPUs to reserve for enclaves.
-                cpu_count: 6
+                cpu_count: 3
                 #
                 # Alternatively, the exact CPUs to be reserved for the enclave can be explicitly
                 # configured by using `cpu_pool` (like below), instead of `cpu_count`.
@@ -559,6 +559,8 @@ Resources:
               DeleteOnTermination: true
               VolumeSize: 20 # GB
               VolumeType: gp3
+        CpuOptions:
+          ThreadsPerCore: 1 # disable multithreading
         EbsOptimized: true
         EnclaveOptions:
           Enabled: true
@@ -592,7 +594,7 @@ Resources:
           MemoryMiB:
             Min: 8192
           VCpuCount:
-            Min: 8
+            Min: 4
         ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64}}"
         MetadataOptions:
           HttpEndpoint: enabled
