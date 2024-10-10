@@ -560,6 +560,7 @@ Resources:
               VolumeSize: 20 # GB
               VolumeType: gp3
         CpuOptions:
+          CoreCount: 4
           ThreadsPerCore: 1 # disable multithreading
         EbsOptimized: true
         EnclaveOptions:
