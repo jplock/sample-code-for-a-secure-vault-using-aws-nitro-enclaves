@@ -879,7 +879,7 @@ Resources:
       MixedInstancesPolicy:
         InstancesDistribution:
           OnDemandAllocationStrategy: lowest-price
-          OnDemandBaseCapacity: 1
+          OnDemandBaseCapacity: 0
           OnDemandPercentageAboveBaseCapacity: 0  # all spot
           SpotAllocationStrategy: price-capacity-optimized
         LaunchTemplate:
