@@ -10,7 +10,7 @@ on:
 jobs:
   security_audit:
     runs-on: ubuntu-24.04-arm
-    if: github.repository_owner == 'aws-samples'
+    if: contains(fromJson('["aws-samples", "jplock"]'), github.repository_owner)
     permissions:
       issues: write
       checks: write
