@@ -529,6 +529,8 @@ mod tests {
 
     #[test]
     fn test_complex() {
+        use chrono::{NaiveDate, Utc};
+
         let expressions: HashMap<String, String> =
             HashMap::from([("age".into(), "date(birth_date).age()".into())]);
 
@@ -539,12 +541,18 @@ mod tests {
 
         let (actual, errors) = execute_expressions(&fields, &expressions).unwrap();
 
+        let birth = NaiveDate::from_ymd_opt(1979, 1, 1).unwrap();
+        let expected_age = Utc::now().date_naive().years_since(birth).unwrap();
+
         assert_eq!(actual.get("first_name"), Some(&Value::String("Bob".into())));
         assert_eq!(
             actual.get("birth_date"),
             Some(&Value::String("1979-01-01".into()))
         );
-        assert_eq!(actual.get("age"), Some(&Value::Number(46.into())));
+        assert_eq!(
+            actual.get("age"),
+            Some(&Value::Number(u64::from(expected_age).into()))
+        );
         assert!(errors.is_empty());
     }
 }
