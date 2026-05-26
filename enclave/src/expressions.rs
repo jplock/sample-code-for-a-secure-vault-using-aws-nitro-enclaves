@@ -11,12 +11,23 @@ use serde_json::Value;
 use crate::constants::MAX_EXPRESSION_LENGTH;
 use crate::functions;
 
+/// Applies CEL expressions to a set of decrypted fields.
+///
+/// Returns the transformed field map and a (possibly empty) list of expression
+/// errors. Errors from failing expressions are sanitized before being returned
+/// so they never carry raw library internals or attacker-supplied content to
+/// the vsock response.
+///
+/// An in-place expression (whose key matches an existing field) that fails is
+/// silently skipped — the original decrypted value is preserved. A new-field
+/// expression that fails contributes a sanitized error entry and stores
+/// `Value::Null` for that field.
 pub fn execute_expressions(
     fields: &HashMap<String, Value>,
     expressions: &HashMap<String, String>,
-) -> Result<HashMap<String, Value>> {
+) -> Result<(HashMap<String, Value>, Vec<anyhow::Error>)> {
     if expressions.is_empty() {
-        return Ok(fields.clone());
+        return Ok((fields.clone(), Vec::new()));
     }
 
     // Validate expression lengths before processing
@@ -53,6 +64,7 @@ pub fn execute_expressions(
 
     let mut transformed: HashMap<String, Value> =
         HashMap::with_capacity(fields.len() + expressions.len());
+    let mut cel_errors: Vec<anyhow::Error> = Vec::new();
 
     for (field, decrypted_value) in fields {
         context
@@ -67,22 +79,28 @@ pub fn execute_expressions(
         let value: celValue = match program {
             Ok(program) => match program.execute(&context) {
                 Ok(value) => value,
-                Err(err) => {
+                Err(_) => {
                     // Preserve the original decrypted field value when an in-place expression
                     // (one whose key matches an existing field) fails to execute. Without this,
                     // the error string would overwrite the PII/PHI value the caller relies on.
                     if fields.contains_key(field) {
                         continue;
                     }
-                    format!("Execution Error: {err}").into()
+                    // For new fields: record a sanitized error and store Null rather than
+                    // emitting the raw CEL error text (which can echo attacker-supplied content).
+                    cel_errors.push(anyhow!("expression execution error for field '{field}'"));
+                    transformed.insert(field.to_string(), Value::Null);
+                    continue;
                 }
             },
-            Err(err) => {
+            Err(_) => {
                 // Same preservation rule for compile failures on in-place expressions.
                 if fields.contains_key(field) {
                     continue;
                 }
-                format!("Compile Error: {err}").into()
+                cel_errors.push(anyhow!("expression compile error for field '{field}'"));
+                transformed.insert(field.to_string(), Value::Null);
+                continue;
             }
         };
 
@@ -99,7 +117,7 @@ pub fn execute_expressions(
         transformed.insert(field.to_string(), result);
     }
 
-    Ok(transformed)
+    Ok((transformed, cel_errors))
 }
 
 #[cfg(test)]
@@ -130,7 +148,7 @@ mod tests {
         expressions: &HashMap<String, String>,
     ) -> HashMap<String, Value> {
         match execute_expressions(fields, expressions) {
-            Ok(result) => result,
+            Ok((result, _errors)) => result,
             Err(_) => fields.clone(),
         }
     }
@@ -232,13 +250,14 @@ mod tests {
 
             let expressions: HashMap<String, String> = HashMap::new();
 
-            let result = execute_expressions(&fields, &expressions).unwrap();
+            let (result, errors) = execute_expressions(&fields, &expressions).unwrap();
 
             prop_assert_eq!(
                 result,
                 fields,
                 "Empty expressions should return original fields unchanged"
             );
+            prop_assert!(errors.is_empty(), "No errors expected for empty expressions");
         }
 
         #[test]
@@ -291,7 +310,7 @@ mod tests {
             let mut expressions: HashMap<String, String> = HashMap::new();
             expressions.insert(field_name.clone(), format!("{}.to_uppercase()", field_name));
 
-            let result = execute_expressions(&fields, &expressions).unwrap();
+            let (result, errors) = execute_expressions(&fields, &expressions).unwrap();
 
             // The field should be transformed to uppercase
             prop_assert_eq!(
@@ -299,6 +318,7 @@ mod tests {
                 Some(&Value::String(field_value.to_uppercase())),
                 "Field should be transformed to uppercase"
             );
+            prop_assert!(errors.is_empty(), "No errors expected for successful expressions");
         }
     }
 
@@ -314,12 +334,54 @@ mod tests {
         let fields: HashMap<String, Value> =
             HashMap::from([("first_name".to_string(), "Bob".into())]);
 
-        let actual = execute_expressions(&fields, &expressions).unwrap();
+        let (actual, errors) = execute_expressions(&fields, &expressions).unwrap();
 
         assert_eq!(
             actual.get("first_name"),
             Some(&Value::String("Bob".to_string())),
             "Original decrypted field must be preserved when a colliding expression fails"
+        );
+        // In-place failures are silent — no error entry for them
+        assert!(
+            errors.is_empty(),
+            "In-place expression failure should produce no error entry"
+        );
+    }
+
+    #[test]
+    fn test_failed_new_field_expression_produces_null_and_error() {
+        // A non-in-place expression that fails must store Null (not a raw error string)
+        // and record a sanitized error entry.
+        let expressions: HashMap<String, String> = HashMap::from([(
+            "computed".to_string(),
+            "undefined_var.to_uppercase()".to_string(),
+        )]);
+
+        let fields: HashMap<String, Value> =
+            HashMap::from([("first_name".to_string(), "Bob".into())]);
+
+        let (actual, errors) = execute_expressions(&fields, &expressions).unwrap();
+
+        // The failed new field should be Null, not a raw error string
+        assert_eq!(
+            actual.get("computed"),
+            Some(&Value::Null),
+            "Failed new-field expression must store Value::Null, not raw error text"
+        );
+        // The error entry must not contain raw CEL internals or attacker content
+        assert_eq!(
+            errors.len(),
+            1,
+            "One error expected for the failed new-field expression"
+        );
+        let err_msg = errors[0].to_string();
+        assert!(
+            err_msg.contains("expression") && err_msg.contains("computed"),
+            "Error should name the field but not contain raw library details: {err_msg}"
+        );
+        assert!(
+            err_msg.len() <= 200,
+            "Error message should be within sanitized length limit"
         );
     }
 
@@ -330,8 +392,9 @@ mod tests {
         let expected: HashMap<String, Value> =
             HashMap::from([("first_name".to_string(), "Bob".into())]);
 
-        let actual = execute_expressions(&expected, &expressions).unwrap();
+        let (actual, errors) = execute_expressions(&expected, &expressions).unwrap();
         assert_eq!(actual, expected);
+        assert!(errors.is_empty());
     }
 
     #[test]
@@ -347,8 +410,9 @@ mod tests {
         let expected: HashMap<String, Value> =
             HashMap::from([("first_name".to_string(), "BOB".into())]);
 
-        let actual = execute_expressions(&fields, &expressions).unwrap();
+        let (actual, errors) = execute_expressions(&fields, &expressions).unwrap();
         assert_eq!(actual, expected);
+        assert!(errors.is_empty());
     }
 
     #[test]
@@ -362,7 +426,7 @@ mod tests {
 
         let expected: HashMap<String, Value> = HashMap::from([("first_name".into(), "Bob".into())]);
 
-        let actual = execute_expressions(&fields, &expressions).unwrap();
+        let (actual, _errors) = execute_expressions(&fields, &expressions).unwrap();
         assert_eq!(actual, expected);
     }
 
@@ -377,7 +441,7 @@ mod tests {
 
         let expected: HashMap<String, Value> = HashMap::from([("first_name".into(), "Bob".into())]);
 
-        let actual = execute_expressions(&fields, &expressions).unwrap();
+        let (actual, _errors) = execute_expressions(&fields, &expressions).unwrap();
         assert_eq!(actual, expected);
     }
 
@@ -399,7 +463,11 @@ mod tests {
 
         let fields = HashMap::default();
         // Note: Using Vec for comparison since HashMap ordering is non-deterministic
-        let actual = execute_expressions(&fields, &expressions).unwrap();
+        let (actual, errors) = execute_expressions(&fields, &expressions).unwrap();
+        assert!(
+            errors.is_empty(),
+            "No errors expected for valid expressions"
+        );
 
         assert_eq!(actual.get("is_empty"), Some(&Value::Bool(true)));
         assert_eq!(
@@ -443,7 +511,7 @@ mod tests {
             HashMap::from([("hex_decode".into(), "'426F6F'.hex_decode()".into())]);
 
         let fields = HashMap::default();
-        let actual = execute_expressions(&fields, &expressions).unwrap();
+        let (actual, _errors) = execute_expressions(&fields, &expressions).unwrap();
 
         assert_eq!(actual.get("hex_decode"), Some(&Value::String("Boo".into())));
     }
@@ -454,7 +522,7 @@ mod tests {
             HashMap::from([("hex_decode".into(), "'426F62'.hex_decode()".into())]);
 
         let fields = HashMap::default();
-        let actual = execute_expressions(&fields, &expressions).unwrap();
+        let (actual, _errors) = execute_expressions(&fields, &expressions).unwrap();
 
         assert_eq!(actual.get("hex_decode"), Some(&Value::String("Bob".into())));
     }
@@ -469,7 +537,7 @@ mod tests {
             ("birth_date".into(), "1979-01-01".into()),
         ]);
 
-        let actual = execute_expressions(&fields, &expressions).unwrap();
+        let (actual, errors) = execute_expressions(&fields, &expressions).unwrap();
 
         assert_eq!(actual.get("first_name"), Some(&Value::String("Bob".into())));
         assert_eq!(
@@ -477,5 +545,6 @@ mod tests {
             Some(&Value::String("1979-01-01".into()))
         );
         assert_eq!(actual.get("age"), Some(&Value::Number(46.into())));
+        assert!(errors.is_empty());
     }
 }
