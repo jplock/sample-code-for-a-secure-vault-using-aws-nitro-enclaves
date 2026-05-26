@@ -10,3 +10,4 @@ samconfig.toml
 *.xlsx
 site
 .env
+.local/
