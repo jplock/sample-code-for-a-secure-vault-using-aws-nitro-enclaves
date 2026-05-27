@@ -21,14 +21,12 @@ use vsock::VsockListener;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[inline]
 fn parse_payload(payload_buffer: &[u8]) -> Result<EnclaveRequest> {
     let payload: EnclaveRequest = serde_json::from_slice(payload_buffer)
         .map_err(|err| anyhow!("failed to deserialize payload: {err:?}"))?;
     Ok(payload)
 }
 
-#[inline]
 fn send_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
     // Sanitize before logging AND before including in the wire response.
     let sanitized_msg = sanitize_error_message(&err);
@@ -162,9 +160,14 @@ fn main() -> Result<()> {
                 // at (or beyond) the limit we immediately release our slot and
                 // reject. This eliminates the TOCTOU window that existed with
                 // a separate load + add.
-                let prev = active_connections.fetch_add(1, Ordering::SeqCst);
+                //
+                // Relaxed is sufficient: this counter never participates in
+                // synchronizing other memory accesses — it only gates whether
+                // we accept the connection. The atomicity of fetch_add itself
+                // is what matters, not its ordering with respect to other ops.
+                let prev = active_connections.fetch_add(1, Ordering::Relaxed);
                 if prev >= MAX_CONCURRENT_CONNECTIONS {
-                    active_connections.fetch_sub(1, Ordering::SeqCst);
+                    active_connections.fetch_sub(1, Ordering::Relaxed);
                     println!(
                         "[enclave warning] connection limit reached ({}/{}), rejecting",
                         prev, MAX_CONCURRENT_CONNECTIONS
@@ -182,7 +185,7 @@ fn main() -> Result<()> {
                         println!("[enclave error] {sanitized}");
                     }
                     // Decrement connection count when done
-                    connections.fetch_sub(1, Ordering::SeqCst);
+                    connections.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(e) => {

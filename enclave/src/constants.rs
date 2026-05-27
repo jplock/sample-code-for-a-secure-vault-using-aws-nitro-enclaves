@@ -41,5 +41,11 @@ pub const P384: &[u8; 10] = &[72, 80, 75, 69, 0, 17, 0, 2, 0, 2];
 // build_suite_id(0x0012u16, 0x0003u16, 0x0002u16) - DH_KEM_P521_HKDF_SHA512_AES_256
 pub const P521: &[u8; 10] = &[72, 80, 75, 69, 0, 18, 0, 3, 0, 2];
 
+// Encoding discriminants sent over the wire. These string values are the
+// over-the-wire form of the encoding selector on the JSON request payload
+// and MUST stay in lockstep with the Python side at
+// `api/src/app/enums.py::EncodingVersion` (HEX = 1, BINARY = 2). Round-trip
+// is asserted by `models::tests::test_encoding_try_from_hex_str` and
+// `test_encoding_try_from_binary_str`.
 pub const ENCODING_HEX: &str = "1";
 pub const ENCODING_BINARY: &str = "2";

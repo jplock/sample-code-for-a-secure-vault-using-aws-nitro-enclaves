@@ -15,7 +15,6 @@ const MAX_ERROR_MSG_LEN: usize = 200;
 ///
 /// Truncation uses [`str::floor_char_boundary`] so the cut never falls inside a
 /// multi-byte codepoint (which would panic with `panic = "abort"` in release builds).
-#[inline]
 pub fn sanitize_error_message(err: &Error) -> String {
     let msg = err.to_string();
     if msg.len() > MAX_ERROR_MSG_LEN {
@@ -28,7 +27,6 @@ pub fn sanitize_error_message(err: &Error) -> String {
     }
 }
 
-#[inline]
 pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
     let decoded = BASE64
         .decode(input.as_bytes())

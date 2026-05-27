@@ -46,6 +46,15 @@ use crate::hpke::decrypt_value;
 use crate::kms::{SecureHpkePrivateKey, get_secret_key};
 use crate::utils::{base64_decode, sanitize_error_message};
 
+/// Rejects requests whose field count exceeds the per-request maximum.
+/// Used by [`EnclaveRequest::validate`] and directly by tests.
+fn validate_field_count(count: usize) -> Result<()> {
+    if count > MAX_FIELDS {
+        bail!("field count {} exceeds maximum {}", count, MAX_FIELDS);
+    }
+    Ok(())
+}
+
 /// AWS credentials for KMS access.
 ///
 /// These credentials are passed from the parent instance and used to authenticate
@@ -163,14 +172,9 @@ impl EnclaveRequest {
             bail!("encrypted_private_key cannot be empty");
         }
 
-        // Validate field count
-        if self.request.fields.len() > MAX_FIELDS {
-            bail!(
-                "field count {} exceeds maximum {}",
-                self.request.fields.len(),
-                MAX_FIELDS
-            );
-        }
+        // Validate field count via the shared helper so tests exercise the
+        // same code path callers do.
+        validate_field_count(self.request.fields.len())?;
 
         Ok(())
     }
@@ -392,7 +396,6 @@ pub enum Encoding {
 
 impl Encoding {
     /// Parse encrypted data according to this encoding format
-    #[inline]
     pub fn parse(&self, value: &str, suite: &Suite) -> Result<EncryptedData> {
         match self {
             Encoding::Hex => EncryptedData::from_hex(value),
@@ -460,11 +463,6 @@ impl Suite {
             Suite::P384 => &ECDSA_P384_SHA384_ASN1_SIGNING,
             Suite::P521 => &ECDSA_P521_SHA512_ASN1_SIGNING,
         }
-    }
-
-    /// Returns the HPKE suite implementation (alias for backward compatibility)
-    pub fn get_suite(&self) -> &'static dyn Hpke {
-        self.get_hpke_suite()
     }
 
     /// Returns the raw suite ID bytes for this suite.
@@ -1011,17 +1009,9 @@ mod tests {
     // *For any* request with field count greater than MAX_FIELDS, the decrypt_fields()
     // function SHALL return an error before attempting to decrypt any fields.
     //
-    // Note: Since decrypt_fields() requires KMS operations, we test the validation
-    // logic by creating requests with varying field counts and verifying the error
-    // behavior. We use a helper function to validate field counts independently.
-
-    /// Helper function to validate field count (extracted from decrypt_fields logic)
-    fn validate_field_count(field_count: usize) -> Result<()> {
-        if field_count > MAX_FIELDS {
-            bail!("field count {} exceeds maximum {}", field_count, MAX_FIELDS);
-        }
-        Ok(())
-    }
+    // Since decrypt_fields() requires KMS operations, the property tests below
+    // invoke `super::validate_field_count` directly — the same free function
+    // that `EnclaveRequest::validate` delegates to in production.
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]

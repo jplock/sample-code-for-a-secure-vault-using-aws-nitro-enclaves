@@ -48,7 +48,6 @@ use crate::constants::MAX_MESSAGE_SIZE;
 /// Returns an error if:
 /// - The message length exceeds `u64::MAX`
 /// - Writing to the stream fails
-#[inline]
 #[tracing::instrument(skip(stream, msg))]
 pub fn send_message(stream: &mut VsockStream, msg: String) -> Result<()> {
     // Write 8-byte little-endian length header
@@ -88,7 +87,6 @@ pub fn send_message(stream: &mut VsockStream, msg: String) -> Result<()> {
 /// - Reading from the stream fails
 /// - The message size exceeds [`MAX_MESSAGE_SIZE`]
 /// - Memory allocation fails
-#[inline]
 #[tracing::instrument(skip(stream))]
 pub fn recv_message(stream: &mut VsockStream) -> Result<Vec<u8>> {
     // Read 8-byte little-endian length header
