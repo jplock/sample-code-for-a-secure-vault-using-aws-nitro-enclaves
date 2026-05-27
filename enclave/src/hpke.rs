@@ -21,6 +21,7 @@
 use anyhow::{Result, anyhow};
 use rustls::crypto::hpke::{EncapsulatedSecret, Hpke, HpkePrivateKey};
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::models::EncryptedData;
 
@@ -55,23 +56,31 @@ pub fn decrypt_value(
 
     let enc = EncapsulatedSecret(encrypted_data.encapped_key);
 
-    let plaintext_value = suite
-        .open(
-            &enc,
-            info,
-            aad.as_bytes(),
-            &encrypted_data.ciphertext,
-            private_key,
-        )
-        .map_err(|err| anyhow!("[{}] unable to decrypt data: {:?}", aad, err))?;
+    // Wrap the raw plaintext bytes immediately so they are zeroized when
+    // this binding drops, regardless of the UTF-8 conversion outcome.
+    // The resulting `String` is not itself zeroized (accepted scope), but
+    // this closes the larger window of the raw `Vec<u8>` surviving on the heap.
+    let plaintext_value: Zeroizing<Vec<u8>> = Zeroizing::new(
+        suite
+            .open(
+                &enc,
+                info,
+                aad.as_bytes(),
+                &encrypted_data.ciphertext,
+                private_key,
+            )
+            .map_err(|err| anyhow!("[{}] unable to decrypt data: {:?}", aad, err))?,
+    );
 
-    let string_value = String::from_utf8(plaintext_value).map_err(|err| {
-        anyhow!(
-            "[{}] unable to convert plaintext data to string: {:?}",
-            aad,
-            err
-        )
-    })?;
+    let string_value = std::str::from_utf8(&plaintext_value)
+        .map_err(|err| {
+            anyhow!(
+                "[{}] unable to convert plaintext data to string: {:?}",
+                aad,
+                err
+            )
+        })?
+        .to_owned();
 
     Ok(Value::String(string_value))
 }

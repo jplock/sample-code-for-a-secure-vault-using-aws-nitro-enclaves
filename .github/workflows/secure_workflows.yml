@@ -24,7 +24,7 @@ permissions:
 jobs:
   enforce_pinned_workflows:
     name: Harden Security
-    if: github.repository_owner == 'aws-samples'
+    if: contains(fromJson('["aws-samples", "jplock"]'), github.repository_owner)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

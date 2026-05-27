@@ -5,6 +5,7 @@ authors = ["Justin Plock <jplock@amazon.com>"]
 description = "Parent instance application for AWS Nitro Enclaves Vault"
 edition = "2024"
 publish = false
+license = "MIT-0"
 default-run = "parent-vault"
 
 [lib]

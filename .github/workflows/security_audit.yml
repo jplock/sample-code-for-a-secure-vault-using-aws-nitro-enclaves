@@ -3,13 +3,14 @@ on:
   schedule:
     - cron: '0 0 * * *'
   push:
-    paths: 
+    paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'deny.toml'
 jobs:
   security_audit:
     runs-on: ubuntu-24.04-arm
-    if: github.repository_owner == 'aws-samples'
+    if: contains(fromJson('["aws-samples", "jplock"]'), github.repository_owner)
     permissions:
       issues: write
       checks: write
@@ -17,5 +18,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
+        continue-on-error: true
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@a531616d8ce3b9177443e48a1159bc945a099823  # v2.0.19
+        with:
+          command: check

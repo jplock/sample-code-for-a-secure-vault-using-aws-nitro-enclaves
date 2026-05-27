@@ -22,7 +22,7 @@ env:
 
 jobs:
   docker:
-    if: github.repository_owner == 'aws-samples'
+    if: contains(fromJson('["aws-samples", "jplock"]'), github.repository_owner)
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout

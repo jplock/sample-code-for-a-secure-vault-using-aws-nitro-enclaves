@@ -42,7 +42,7 @@ use crate::constants::{ENCODING_BINARY, ENCODING_HEX, MAX_FIELDS, P256, P384, P5
 
 use crate::hpke::decrypt_value;
 use crate::kms::{SecureHpkePrivateKey, get_secret_key};
-use crate::utils::base64_decode;
+use crate::utils::{base64_decode, sanitize_error_message};
 
 /// AWS credentials for KMS access.
 ///
@@ -243,7 +243,9 @@ pub struct EnclaveResponse {
 
 impl EnclaveResponse {
     pub fn new(fields: HashMap<String, Value>, errors: Option<Vec<Error>>) -> Self {
-        let errors = errors.map(|errors| errors.iter().map(|e| e.to_string()).collect());
+        // Sanitize every per-field error before it crosses the vsock boundary.
+        // Raw library messages can contain AAD-bound field names or crate internals.
+        let errors = errors.map(|errors| errors.iter().map(sanitize_error_message).collect());
 
         Self {
             fields: Some(fields),
@@ -251,10 +253,14 @@ impl EnclaveResponse {
         }
     }
 
-    pub fn error(error: anyhow::Error) -> Self {
+    /// Builds an error response from an already-sanitized error string.
+    ///
+    /// Callers are responsible for sanitizing the message via
+    /// [`crate::utils::sanitize_error_message`] before passing it here.
+    pub fn error_msg(sanitized: String) -> Self {
         Self {
             fields: None,
-            errors: Some(vec![error.to_string()]),
+            errors: Some(vec![sanitized]),
         }
     }
 }
@@ -1227,8 +1233,8 @@ mod tests {
     }
 
     #[test]
-    fn test_enclave_response_error_serialization() {
-        let response = EnclaveResponse::error(anyhow!("test error message"));
+    fn test_enclave_response_error_msg_serialization() {
+        let response = EnclaveResponse::error_msg("test error message".to_string());
         let json = serde_json::to_string(&response).unwrap();
 
         let parsed: EnclaveResponse = serde_json::from_str(&json).unwrap();
@@ -1351,7 +1357,7 @@ mod tests {
     fn test_to_string_equals_json_macro_error_response() {
         use serde_json::json;
 
-        let response = EnclaveResponse::error(anyhow!("something went wrong"));
+        let response = EnclaveResponse::error_msg("something went wrong".to_string());
 
         let via_to_string = serde_json::to_string(&response).unwrap();
         let via_json_macro = json!(response).to_string();

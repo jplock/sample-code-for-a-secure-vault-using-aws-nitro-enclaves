@@ -1,0 +1,42 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # RUSTSEC-2024-0436: `paste` is unmaintained. It is a transitive dependency
+  # of `cel-interpreter = 0.10.0`. No patched version of cel-interpreter is
+  # available; upgrading is out of scope for this PR. The advisory is
+  # informational (no exploitable vulnerability), so suppression is safe here.
+  { id = "RUSTSEC-2024-0436", reason = "transitive dep via cel-interpreter; no patched upstream available" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Allow licenses observed in the workspace via `cargo deny list`.
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "ISC",
+  "Unicode-3.0",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "Unlicense",
+  "LGPL-2.1-or-later",
+]
+
+[bans]
+# Warn on duplicate versions rather than denying — the workspace has
+# unavoidable transitive duplicates (e.g., http 0.2/1.x from AWS SDK,
+# thiserror 1.x/2.x from cel-interpreter vs parent). Flip to "deny"
+# once the workspace is cleaned up.
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

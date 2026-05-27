@@ -12,6 +12,7 @@ use enclave_vault::{
     expressions::execute_expressions,
     models::{EnclaveRequest, EnclaveResponse},
     protocol::{recv_message, send_message},
+    utils::sanitize_error_message,
 };
 use vsock::VsockListener;
 
@@ -29,11 +30,13 @@ fn parse_payload(payload_buffer: &[u8]) -> Result<EnclaveRequest> {
 
 #[inline]
 fn send_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
-    // Sanitize error message to avoid leaking sensitive data
+    // Sanitize before logging AND before including in the wire response.
     let sanitized_msg = sanitize_error_message(&err);
     println!("[enclave error] {sanitized_msg}");
 
-    let response = EnclaveResponse::error(err);
+    // Build the response from the already-sanitized string so raw library
+    // error text never reaches the vsock boundary.
+    let response = EnclaveResponse::error_msg(sanitized_msg);
 
     let payload: String = serde_json::to_string(&response)
         .map_err(|err| anyhow!("failed to serialize error response: {err:?}"))?;
@@ -44,19 +47,6 @@ fn send_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Sanitizes error messages to prevent sensitive data leakage in logs.
-/// Removes potential field values, keys, or other sensitive content.
-#[inline]
-fn sanitize_error_message(err: &Error) -> String {
-    let msg = err.to_string();
-    // Truncate very long error messages that might contain data
-    if msg.len() > 200 {
-        format!("{}... (truncated)", &msg[..200])
-    } else {
-        msg
-    }
 }
 
 fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
@@ -78,22 +68,23 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
         Err(err) => return send_error(stream, err),
     };
 
-    let final_fields = match payload.request.expressions {
+    let (final_fields, cel_errors) = match payload.request.expressions {
         Some(expressions) => match execute_expressions(&decrypted_fields, &expressions) {
-            Ok(fields) => fields,
+            Ok((fields, errs)) => (fields, errs),
             Err(err) => {
                 println!("[enclave warning] expression execution failed");
                 // Only log error details in debug builds
                 #[cfg(debug_assertions)]
                 println!("[enclave debug] expression error: {:?}", err);
-                let _ = err; // Silence unused warning in release
-                decrypted_fields
+                (decrypted_fields, Vec::new())
             }
         },
-        None => decrypted_fields,
+        None => (decrypted_fields, Vec::new()),
     };
 
-    let response = EnclaveResponse::new(final_fields, Some(errors));
+    // Merge per-field decryption errors with CEL expression errors.
+    let all_errors: Vec<_> = errors.into_iter().chain(cel_errors).collect();
+    let response = EnclaveResponse::new(final_fields, Some(all_errors));
 
     let payload: String = serde_json::to_string(&response)
         .map_err(|err| anyhow!("failed to serialize response: {err:?}"))?;
@@ -137,20 +128,22 @@ fn main() -> Result<()> {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
-                // Check if we've reached the connection limit
-                let current = active_connections.load(Ordering::SeqCst);
-                if current >= MAX_CONCURRENT_CONNECTIONS {
+                // Atomically claim a slot before checking the limit.
+                // fetch_add returns the *previous* value; if that was already
+                // at (or beyond) the limit we immediately release our slot and
+                // reject. This eliminates the TOCTOU window that existed with
+                // a separate load + add.
+                let prev = active_connections.fetch_add(1, Ordering::SeqCst);
+                if prev >= MAX_CONCURRENT_CONNECTIONS {
+                    active_connections.fetch_sub(1, Ordering::SeqCst);
                     println!(
                         "[enclave warning] connection limit reached ({}/{}), rejecting",
-                        current, MAX_CONCURRENT_CONNECTIONS
+                        prev, MAX_CONCURRENT_CONNECTIONS
                     );
                     // Drop the stream to close the connection
                     drop(stream);
                     continue;
                 }
-
-                // Increment connection count
-                active_connections.fetch_add(1, Ordering::SeqCst);
                 let connections = Arc::clone(&active_connections);
 
                 // Spawn a new thread to handle each client concurrently
