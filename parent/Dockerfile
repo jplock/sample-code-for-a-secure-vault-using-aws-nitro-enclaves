@@ -33,9 +33,9 @@ ARG TARGETPLATFORM
 ARG SOURCE_DATE_EPOCH
 
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --target $TARGETPLATFORM --recipe-path recipe.json
+RUN cargo chef cook --release --target $TARGETPLATFORM --recipe-path recipe.json -p parent-vault
 COPY . .
-RUN cargo build --target $TARGETPLATFORM --release --color never
+RUN cargo build --target $TARGETPLATFORM --release --color never -p parent-vault
 
 ####################################################################################################
 ## Final image - used only for extracting the built binary

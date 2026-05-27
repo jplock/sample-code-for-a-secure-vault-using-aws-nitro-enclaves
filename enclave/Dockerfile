@@ -176,9 +176,9 @@ FROM chef AS builder
 ARG TARGETPLATFORM
 
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --target $TARGETPLATFORM --recipe-path recipe.json
+RUN cargo chef cook --release --target $TARGETPLATFORM --recipe-path recipe.json -p enclave-vault
 COPY . .
-RUN cargo build --target $TARGETPLATFORM --release --color never
+RUN cargo build --target $TARGETPLATFORM --release --color never -p enclave-vault
 
 ####################################################################################################
 ## Runtime deps - install packages here so the final image only has COPY layers

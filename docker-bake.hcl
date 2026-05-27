@@ -11,9 +11,15 @@ group "default" {
     targets = ["parent", "enclave"]
 }
 
+// Build context is the workspace root so each crate's Dockerfile can
+// see the workspace Cargo.toml / Cargo.lock and any shared crates
+// (e.g. vault-protocol/) referenced via path dependencies. The repo's
+// .dockerignore filters out everything that isn't part of the Rust
+// build (Python sources, CFN templates, docs, tool config dirs).
+
 target "parent" {
-    context = "./parent"
-    dockerfile = "Dockerfile"
+    context = "."
+    dockerfile = "parent/Dockerfile"
     args = {
         TARGETPLATFORM = "aarch64-unknown-linux-gnu"
         SOURCE_DATE_EPOCH = "${SOURCE_DATE_EPOCH}"
@@ -25,8 +31,8 @@ target "parent" {
 }
 
 target "enclave" {
-    context = "./enclave"
-    dockerfile = "Dockerfile"
+    context = "."
+    dockerfile = "enclave/Dockerfile"
     args = {
         TARGETPLATFORM = "aarch64-unknown-linux-musl"
         SOURCE_DATE_EPOCH = "${SOURCE_DATE_EPOCH}"

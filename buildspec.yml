@@ -11,14 +11,17 @@ phases:
       - export SOURCE_DATE_EPOCH=0
       # Build parent image with BuildKit
       - docker buildx bake -f docker-bake.hcl parent
-      # Build enclave image with Kaniko for reproducible PCR0
+      # Build enclave image with Kaniko for reproducible PCR0.
+      # Context is the workspace root so the Dockerfile can see the
+      # workspace Cargo.toml/Cargo.lock and shared crates (e.g.
+      # vault-protocol/). The repo .dockerignore filters non-Rust files.
       - mkdir -p /tmp/enclave-output
       - >-
         docker run --rm
-        -v $(pwd)/enclave:/workspace
+        -v $(pwd):/workspace
         -v /tmp/enclave-output:/output
         gcr.io/kaniko-project/executor:v1.23.2
-        --dockerfile /workspace/Dockerfile
+        --dockerfile /workspace/enclave/Dockerfile
         --context /workspace
         --reproducible
         --no-push
