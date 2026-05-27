@@ -78,9 +78,9 @@ fn call_kms_decrypt(credential: &Credential, ciphertext: &str, region: &str) -> 
     // Call FFI wrapper directly instead of spawning subprocess
     aws_ne::kms_decrypt(
         region.as_bytes(),
-        credential.access_key_id.as_bytes(),
-        credential.secret_access_key.as_bytes(),
-        credential.session_token.as_bytes(),
+        credential.access_key_id().as_bytes(),
+        credential.secret_access_key().as_bytes(),
+        credential.session_token().as_bytes(),
         &ciphertext_bytes,
     )
     .map_err(|e| anyhow!("KMS decrypt failed: {}", e))

@@ -7,6 +7,8 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'deny.toml'
+      - '.github/workflows/security_audit.yml'
+  workflow_dispatch:
 jobs:
   security_audit:
     runs-on: ubuntu-24.04-arm
@@ -21,7 +23,9 @@ jobs:
         continue-on-error: true
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: cargo deny check
-        uses: EmbarkStudios/cargo-deny-action@a531616d8ce3b9177443e48a1159bc945a099823  # v2.0.19
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@60ae4ce63c7aeb6e96d7f572c1ec7fafbb17ca80  # v2.79.10
         with:
-          command: check
+          tool: cargo-deny
+      - name: cargo-deny check
+        run: cargo-deny check

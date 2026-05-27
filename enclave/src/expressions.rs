@@ -8,8 +8,20 @@ use cel_interpreter::Value as celValue;
 use cel_interpreter::{Context, Program};
 use serde_json::Value;
 
-use crate::constants::MAX_EXPRESSION_LENGTH;
+use crate::constants::{MAX_EXPRESSION_LENGTH, MAX_EXPRESSIONS};
 use crate::functions;
+
+/// Rejects requests that try to enqueue more CEL expressions than the
+/// enclave is willing to evaluate in a single call. Surfaced as a hard
+/// error to the caller rather than the silent-fallback path inside
+/// `execute_expressions`, so clients see the cap rejection in the
+/// response `errors[]` list instead of getting un-transformed fields.
+pub fn validate_expressions_count(n: usize) -> Result<()> {
+    if n > MAX_EXPRESSIONS {
+        bail!("expression count {} exceeds maximum {}", n, MAX_EXPRESSIONS);
+    }
+    Ok(())
+}
 
 /// Applies CEL expressions to a set of decrypted fields.
 ///
@@ -383,6 +395,26 @@ mod tests {
             err_msg.len() <= 200,
             "Error message should be within sanitized length limit"
         );
+    }
+
+    #[test]
+    fn test_validate_expressions_count_at_max() {
+        assert!(validate_expressions_count(MAX_EXPRESSIONS).is_ok());
+    }
+
+    #[test]
+    fn test_validate_expressions_count_over_max() {
+        let result = validate_expressions_count(MAX_EXPRESSIONS + 1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("expression count"));
+        assert!(err_msg.contains(&(MAX_EXPRESSIONS + 1).to_string()));
+        assert!(err_msg.contains(&MAX_EXPRESSIONS.to_string()));
+    }
+
+    #[test]
+    fn test_validate_expressions_count_zero() {
+        assert!(validate_expressions_count(0).is_ok());
     }
 
     #[test]

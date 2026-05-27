@@ -8,8 +8,8 @@ use std::thread;
 
 use anyhow::{Error, Result, anyhow};
 use enclave_vault::{
-    constants::{ENCLAVE_PORT, MAX_CONCURRENT_CONNECTIONS},
-    expressions::execute_expressions,
+    constants::{ENCLAVE_PORT, MAX_CONCURRENT_CONNECTIONS, VSOCK_IO_TIMEOUT},
+    expressions::{execute_expressions, validate_expressions_count},
     models::{EnclaveRequest, EnclaveResponse},
     protocol::{recv_message, send_message},
     utils::sanitize_error_message,
@@ -61,6 +61,15 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
         },
         Err(err) => return send_error(stream, err),
     };
+
+    // Bound the number of CEL expressions before any decrypt work — a request
+    // with thousands of expressions would otherwise force the enclave through
+    // a full HPKE decrypt pass first.
+    if let Some(ref expressions) = payload.request.expressions
+        && let Err(err) = validate_expressions_count(expressions.len())
+    {
+        return send_error(stream, err);
+    }
 
     // Decrypt the individual field values (uses rayon for parallelization internally)
     let (decrypted_fields, errors) = match payload.decrypt_fields() {
@@ -128,6 +137,26 @@ fn main() -> Result<()> {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
+                // Bound how long any single accepted connection can stall a
+                // worker thread. The parent already sets matching timeouts on
+                // its end (see parent::enclaves::VSOCK_IO_TIMEOUT) — without
+                // this, a peer that opens a vsock connection and never sends
+                // a payload would tie up a thread until the kernel kills it.
+                if let Err(e) = stream.set_read_timeout(Some(VSOCK_IO_TIMEOUT)) {
+                    println!(
+                        "[enclave warning] failed to set vsock read timeout: {e:?}, rejecting connection"
+                    );
+                    drop(stream);
+                    continue;
+                }
+                if let Err(e) = stream.set_write_timeout(Some(VSOCK_IO_TIMEOUT)) {
+                    println!(
+                        "[enclave warning] failed to set vsock write timeout: {e:?}, rejecting connection"
+                    );
+                    drop(stream);
+                    continue;
+                }
+
                 // Atomically claim a slot before checking the limit.
                 // fetch_add returns the *previous* value; if that was already
                 // at (or beyond) the limit we immediately release our slot and
