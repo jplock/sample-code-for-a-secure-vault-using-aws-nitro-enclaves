@@ -19,11 +19,10 @@ use anyhow::{Result, anyhow};
 use aws_lc_rs::encoding::AsBigEndian;
 use aws_lc_rs::signature::{EcdsaKeyPair, EcdsaSigningAlgorithm};
 use rustls::crypto::hpke::HpkePrivateKey;
+use vault_protocol::{Credential, EnclaveRequest};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::aws_ne;
-use crate::models::{Credential, EnclaveRequest};
-use crate::utils::base64_decode;
 
 /// A secure wrapper for HPKE private keys that zeroizes key material on drop.
 ///
@@ -65,23 +64,16 @@ impl SecureHpkePrivateKey {
 /// # Arguments
 ///
 /// * `credential` - AWS credentials for KMS access
-/// * `ciphertext` - Base64-encoded ciphertext to decrypt
+/// * `ciphertext` - Raw KMS ciphertext (no base64 envelope; the parent
+///   strips that at the API boundary before forwarding)
 /// * `region` - AWS region where the KMS key resides
-///
-/// # Returns
-///
-/// Returns the decrypted plaintext bytes.
-fn call_kms_decrypt(credential: &Credential, ciphertext: &str, region: &str) -> Result<Vec<u8>> {
-    // Base64 decode the ciphertext
-    let ciphertext_bytes = base64_decode(ciphertext)?;
-
-    // Call FFI wrapper directly instead of spawning subprocess
+fn call_kms_decrypt(credential: &Credential, ciphertext: &[u8], region: &str) -> Result<Vec<u8>> {
     aws_ne::kms_decrypt(
         region.as_bytes(),
         credential.access_key_id().as_bytes(),
         credential.secret_access_key().as_bytes(),
         credential.session_token().as_bytes(),
-        &ciphertext_bytes,
+        ciphertext,
     )
     .map_err(|e| anyhow!("KMS decrypt failed: {}", e))
 }
@@ -112,10 +104,12 @@ pub fn get_secret_key(
     alg: &'static EcdsaSigningAlgorithm,
     payload: &EnclaveRequest,
 ) -> Result<SecureHpkePrivateKey> {
-    // Call KMS decrypt via FFI wrapper - returns plaintext bytes directly
+    // Call KMS decrypt via FFI wrapper — returns plaintext bytes directly.
+    // The encrypted blob arrives as raw bytes; the parent strips the
+    // API-side base64 envelope at the HTTPS boundary.
     let mut plaintext_sk = call_kms_decrypt(
         &payload.credential,
-        &payload.request.encrypted_private_key, // base64 encoded
+        &payload.request.encrypted_private_key,
         &payload.request.region,
     )
     .map_err(|err| anyhow!("failed to call KMS: {err:?}"))?;

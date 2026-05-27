@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "enclave",
-    "parent"
+    "parent",
+    "vault-protocol",
 ]
 resolver = "2"
 
@@ -11,3 +12,39 @@ lto = true        # Enable full link time optimization for better size reduction
 codegen-units = 1 # Maximize size reduction optimizations
 panic = "abort"   # Terminate process upon panic
 opt-level = "z"   # Optimize for size (more aggressive than "s")
+
+# Single source of truth for every external dependency version in the
+# workspace. The root only pins the exact version and disables default
+# features; each member crate declares the features it actually needs.
+# Versions cannot drift across crates this way.
+[workspace.dependencies]
+anyhow = { version = "=1.0.100", default-features = false }
+aws-config = { version = "=1.8.12", default-features = false }
+aws-credential-types = { version = "=1.2.11", default-features = false }
+aws-lc-rs = { version = "=1.17.0", default-features = false }
+aws-smithy-runtime-api = { version = "=1.9.3", default-features = false }
+axum = { version = "=0.8.8", default-features = false }
+axum-test = { version = "=18.4.1", default-features = false }
+cel-interpreter = { version = "=0.10.0", default-features = false }
+chrono = { version = "=0.4.42", default-features = false }
+ciborium = { version = "=0.2.2", default-features = false }
+clap = { version = "=4.5.53", default-features = false }
+data-encoding = { version = "=2.9.0", default-features = false }
+fastrand = { version = "=2.3.0", default-features = false }
+libc = { version = "=0.2.178", default-features = false }
+mimalloc = { version = "=0.1.48", default-features = false }
+proptest = { version = "=1.9.0", default-features = false }
+rayon = { version = "=1.10.0", default-features = false }
+rustls = { version = "=0.23.40", default-features = false }
+serde = { version = "=1.0.228", default-features = false }
+serde_json = { version = "=1.0.145", default-features = false }
+thiserror = { version = "=2.0.17", default-features = false }
+tokio = { version = "=1.48.0", default-features = false }
+tokio-test = { version = "=0.4.4", default-features = false }
+tower-http = { version = "=0.6.8", default-features = false }
+tracing = { version = "=0.1.44", default-features = false }
+tracing-subscriber = { version = "=0.3.22", default-features = false }
+validator = { version = "=0.20.0", default-features = false }
+vault-protocol = { path = "vault-protocol" }
+vsock = { version = "=0.5.2", default-features = false }
+zeroize = { version = "=1.8.2", default-features = false }

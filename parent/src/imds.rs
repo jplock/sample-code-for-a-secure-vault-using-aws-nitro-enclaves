@@ -25,18 +25,21 @@ use std::time::SystemTime;
 
 use aws_config::imds::client::{Client, ImdsResponseRetryClassifier};
 use aws_config::imds::credentials::ImdsCredentialsProvider;
+use aws_credential_types::Credentials;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_smithy_runtime_api::client::retries::classifiers::SharedRetryClassifier;
 use tokio::sync::RwLock;
 
 use crate::constants;
 use crate::errors::AppError;
-use crate::models::Credential;
 
 /// Cached credential with expiration time.
 struct CachedCredential {
-    /// The actual credential.
-    credential: Credential,
+    /// The actual credential. We hold the SDK type directly so the
+    /// `expiry()`, `access_key_id()`, etc. methods are available without
+    /// translation; the cache mirrors what `ImdsCredentialsProvider`
+    /// returns.
+    credential: Credentials,
     /// When the credential expires (None = never).
     expires_at: Option<SystemTime>,
 }
@@ -81,7 +84,7 @@ impl CredentialCache {
     ///
     /// Returns `AppError::ConfigError` if IMDS client setup fails.
     /// Returns `AppError::InternalServerError` for credential fetch failures.
-    pub async fn get_credentials(&self) -> Result<Credential, AppError> {
+    pub async fn get_credentials(&self) -> Result<Credentials, AppError> {
         // Fast path: check if cached credentials are still valid
         {
             let cache = self.cached.read().await;
@@ -119,7 +122,7 @@ impl CredentialCache {
     ///
     /// Uses double-check locking to prevent redundant refreshes when
     /// multiple threads detect expiry simultaneously.
-    async fn refresh(&self) -> Result<Credential, AppError> {
+    async fn refresh(&self) -> Result<Credentials, AppError> {
         tracing::debug!("[parent] refreshing credentials from IMDS");
         let mut cache = self.cached.write().await;
 
@@ -164,7 +167,7 @@ impl CredentialCache {
 /// A tuple of (credential, optional expiry time).
 async fn load_credentials_with_expiry(
     profile: Option<String>,
-) -> Result<(Credential, Option<SystemTime>), AppError> {
+) -> Result<(Credentials, Option<SystemTime>), AppError> {
     let client = Client::builder()
         .endpoint("http://169.254.169.254:80")
         .map_err(|e| AppError::ConfigError(e.to_string()))?
@@ -185,7 +188,7 @@ async fn load_credentials_with_expiry(
     let credentials = imds.provide_credentials().await?;
     let expires_at = credentials.expiry();
 
-    Ok((credentials.into(), expires_at))
+    Ok((credentials, expires_at))
 }
 
 #[cfg(test)]
@@ -209,11 +212,7 @@ mod tests {
     async fn test_is_valid_no_expiry() {
         let cache = CredentialCache::new(None);
         let cached = CachedCredential {
-            credential: Credential {
-                access_key_id: "AKIA123".to_string(),
-                secret_access_key: "secret".to_string(),
-                session_token: "token".to_string(),
-            },
+            credential: Credentials::new("AKIA123", "secret", Some("token".into()), None, "test"),
             expires_at: None,
         };
         assert!(cache.is_valid(&cached));
@@ -223,11 +222,7 @@ mod tests {
     async fn test_is_valid_far_future_expiry() {
         let cache = CredentialCache::new(None);
         let cached = CachedCredential {
-            credential: Credential {
-                access_key_id: "AKIA123".to_string(),
-                secret_access_key: "secret".to_string(),
-                session_token: "token".to_string(),
-            },
+            credential: Credentials::new("AKIA123", "secret", Some("token".into()), None, "test"),
             expires_at: Some(SystemTime::now() + Duration::from_secs(3600)), // 1 hour
         };
         assert!(cache.is_valid(&cached));
@@ -237,11 +232,7 @@ mod tests {
     async fn test_is_valid_within_refresh_buffer() {
         let cache = CredentialCache::new(None);
         let cached = CachedCredential {
-            credential: Credential {
-                access_key_id: "AKIA123".to_string(),
-                secret_access_key: "secret".to_string(),
-                session_token: "token".to_string(),
-            },
+            credential: Credentials::new("AKIA123", "secret", Some("token".into()), None, "test"),
             // Expires in 30 seconds, but buffer is 60 seconds
             expires_at: Some(SystemTime::now() + Duration::from_secs(30)),
         };
@@ -253,11 +244,7 @@ mod tests {
     async fn test_is_valid_expired() {
         let cache = CredentialCache::new(None);
         let cached = CachedCredential {
-            credential: Credential {
-                access_key_id: "AKIA123".to_string(),
-                secret_access_key: "secret".to_string(),
-                session_token: "token".to_string(),
-            },
+            credential: Credentials::new("AKIA123", "secret", Some("token".into()), None, "test"),
             expires_at: Some(SystemTime::now() - Duration::from_secs(1)), // Already expired
         };
         assert!(!cache.is_valid(&cached));
@@ -267,11 +254,7 @@ mod tests {
     async fn test_is_valid_just_outside_buffer() {
         let cache = CredentialCache::new(None);
         let cached = CachedCredential {
-            credential: Credential {
-                access_key_id: "AKIA123".to_string(),
-                secret_access_key: "secret".to_string(),
-                session_token: "token".to_string(),
-            },
+            credential: Credentials::new("AKIA123", "secret", Some("token".into()), None, "test"),
             // Expires in 120 seconds, buffer is 60 seconds, so should be valid
             expires_at: Some(SystemTime::now() + Duration::from_secs(120)),
         };

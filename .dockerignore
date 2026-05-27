@@ -10,8 +10,12 @@
 .cfnlintrc
 .env
 .env.template
+.claude
+.kiro
+.local
 target
 api
+canary
 docs
 site
 scripts
