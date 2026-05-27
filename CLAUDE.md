@@ -132,7 +132,7 @@ The KMS key policy is the security root of trust: it only allows decryption from
 
 GitHub Actions, all on `ubuntu-24.04-arm`:
 - `rust.yml`: fmt --check, build, clippy `-D warnings`, `check_no_panic.sh`, `cargo test`
-- `security_audit.yml`: daily RustSec audit + on every `Cargo.toml`/`Cargo.lock` push
+- `security_audit.yml`: daily RustSec audit + on every `Cargo.toml`/`Cargo.lock`/`deny.toml` push + manual `workflow_dispatch`
 - `docker-bake.yml`: multi-platform Docker builds (no push)
 - `deploy-docs.yml`: MkDocs site → GitHub Pages
 - `secure_workflows.yml`: workflow security checks
