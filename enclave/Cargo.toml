@@ -25,6 +25,11 @@ anyhow = { version = "=1.0.100", default-features = false }
 libc = { version = "=0.2.178", default-features = false }
 aws-lc-rs = { version = "=1.17.0", default-features = false }
 cel-interpreter = { version = "=0.10.0", default-features = false, features = ["json", "chrono"] }
+# Direct dep solely because cel-interpreter's "chrono" feature exposes
+# chrono types (DateTime<FixedOffset>, etc.) through its public API, which
+# our CEL function shims in src/functions.rs (today_utc, age, date) must
+# name. The project otherwise prefers jiff; switch here only after
+# cel-interpreter drops chrono from its public surface.
 chrono = { version = "=0.4.42", default-features = false, features = ["now"] }
 data-encoding = { version = "=2.9.0", default-features = false, features = ["alloc"] }
 rayon = { version = "=1.10.0", default-features = false }
