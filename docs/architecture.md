@@ -25,5 +25,5 @@ This solution has three components:
 
 Runs within a Nitro Enclave on an EC2 instance.
 
-* [kmstool-enclave-cli](https://github.com/aws/aws-nitro-enclaves-sdk-c/blob/main/bin/kmstool-enclave-cli/README.md) is used to decrypt the secret key using AWS KMS with the IAM credentials included in the request.
+* The [aws-nitro-enclaves-sdk-c](https://github.com/aws/aws-nitro-enclaves-sdk-c) library is used via FFI to decrypt the secret key using AWS KMS with the IAM credentials included in the request.
 * [Enclave Application](https://github.com/aws-samples/sample-code-for-a-secure-vault-using-aws-nitro-enclaves/tree/main/enclave) written in [Rust](https://www.rust-lang.org/) that decrypts the secret key in the request, then decrypts each encrypted attribute that was provided in the request. Attributes can be transformed using the [Common Expression Language](https://github.com/google/cel-spec) (CEL).
