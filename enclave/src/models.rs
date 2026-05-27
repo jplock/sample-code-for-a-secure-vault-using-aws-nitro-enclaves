@@ -38,7 +38,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::ZeroizeOnDrop;
 
-use crate::constants::{ENCODING_BINARY, ENCODING_HEX, MAX_FIELDS, P256, P384, P521};
+use crate::constants::{
+    ENCODING_BINARY, ENCODING_HEX, MAX_FIELD_CIPHERTEXT_SIZE, MAX_FIELDS, P256, P384, P521,
+};
 
 use crate::hpke::decrypt_value;
 use crate::kms::{SecureHpkePrivateKey, get_secret_key};
@@ -50,17 +52,45 @@ use crate::utils::{base64_decode, sanitize_error_message};
 /// KMS decrypt requests. The struct implements `ZeroizeOnDrop` to ensure credentials
 /// are securely erased from memory when no longer needed.
 ///
+/// Fields are private and `Clone` is intentionally NOT derived: copying the
+/// struct would create a second `String` whose drop is also zeroized, but the
+/// zeroize guarantee is undermined whenever a copy outlives the original's
+/// drop. Keeping the type non-`Clone` lets the type system enforce the
+/// "single owner, zeroized on drop" invariant under composition.
+///
 /// Note: Debug is manually implemented to redact sensitive fields.
-#[derive(Clone, Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
 pub struct Credential {
     #[serde(rename = "AccessKeyId")]
-    pub access_key_id: String,
+    access_key_id: String,
 
     #[serde(rename = "SecretAccessKey")]
-    pub secret_access_key: String,
+    secret_access_key: String,
 
     #[serde(rename = "Token")]
-    pub session_token: String,
+    session_token: String,
+}
+
+impl Credential {
+    pub fn new(access_key_id: String, secret_access_key: String, session_token: String) -> Self {
+        Self {
+            access_key_id,
+            secret_access_key,
+            session_token,
+        }
+    }
+
+    pub fn access_key_id(&self) -> &str {
+        &self.access_key_id
+    }
+
+    pub fn secret_access_key(&self) -> &str {
+        &self.secret_access_key
+    }
+
+    pub fn session_token(&self) -> &str {
+        &self.session_token
+    }
 }
 
 /// Custom Debug implementation to prevent accidental logging of sensitive data.
@@ -87,7 +117,7 @@ pub struct ParentRequest {
     pub encoding: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EnclaveRequest {
     pub credential: Credential,
     pub request: ParentRequest,
@@ -275,12 +305,29 @@ impl EncryptedData {
     pub fn from_hex(value: &str) -> Result<Self> {
         let data: EncryptedData = match value.split_once('#') {
             Some((hex_encapped_key, hex_ciphertext)) => {
+                // Pre-decode bound: hex is exactly 2 chars per byte, so reject
+                // before allocating a decoder buffer for attacker-controlled input.
+                if hex_ciphertext.len() / 2 > MAX_FIELD_CIPHERTEXT_SIZE {
+                    bail!(
+                        "ciphertext size {} exceeds maximum {}",
+                        hex_ciphertext.len() / 2,
+                        MAX_FIELD_CIPHERTEXT_SIZE
+                    );
+                }
                 let encapped_key = HEXLOWER
                     .decode(hex_encapped_key.as_bytes())
                     .map_err(|err| anyhow!("unable to hex decode encapped key: {:?}", err))?;
                 let ciphertext = HEXLOWER
                     .decode(hex_ciphertext.as_bytes())
                     .map_err(|err| anyhow!("unable to hex decode ciphertext: {:?}", err))?;
+
+                if ciphertext.len() > MAX_FIELD_CIPHERTEXT_SIZE {
+                    bail!(
+                        "ciphertext size {} exceeds maximum {}",
+                        ciphertext.len(),
+                        MAX_FIELD_CIPHERTEXT_SIZE
+                    );
+                }
 
                 Self {
                     encapped_key,
@@ -304,6 +351,15 @@ impl EncryptedData {
                 data.len(),
                 key_size,
                 suite
+            );
+        }
+
+        let ciphertext_len = data.len() - key_size;
+        if ciphertext_len > MAX_FIELD_CIPHERTEXT_SIZE {
+            bail!(
+                "ciphertext size {} exceeds maximum {}",
+                ciphertext_len,
+                MAX_FIELD_CIPHERTEXT_SIZE
             );
         }
 
@@ -680,6 +736,62 @@ mod tests {
         assert!(err_msg.contains("encrypted data too short"));
         assert!(err_msg.contains("50 bytes"));
         assert!(err_msg.contains("97"));
+    }
+
+    #[test]
+    fn test_from_hex_rejects_oversized_ciphertext() {
+        // P384 hex-encoded encapped key (97 bytes -> 194 hex chars), followed
+        // by a ciphertext one byte beyond the cap. Pre-decode check should fire.
+        let hex_encapped_key = "ab".repeat(97);
+        let hex_ciphertext = "cd".repeat(MAX_FIELD_CIPHERTEXT_SIZE + 1);
+        let value = format!("{hex_encapped_key}#{hex_ciphertext}");
+
+        let result = EncryptedData::from_hex(&value);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ciphertext size") && err_msg.contains("exceeds maximum"),
+            "expected size-cap error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_from_binary_rejects_oversized_ciphertext() {
+        // P384: 97-byte encapped key + (MAX + 1) bytes of ciphertext, base64-encoded.
+        let key_size = Suite::P384.encapped_key_size();
+        let mut data = vec![0xABu8; key_size];
+        data.extend(vec![0xCDu8; MAX_FIELD_CIPHERTEXT_SIZE + 1]);
+        let b64 = data_encoding::BASE64.encode(&data);
+
+        let result = EncryptedData::from_binary(&b64, &Suite::P384);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ciphertext size") && err_msg.contains("exceeds maximum"),
+            "expected size-cap error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_from_hex_accepts_ciphertext_at_cap() {
+        // Boundary: exactly MAX_FIELD_CIPHERTEXT_SIZE bytes of ciphertext must pass.
+        let hex_encapped_key = "ab".repeat(97);
+        let hex_ciphertext = "cd".repeat(MAX_FIELD_CIPHERTEXT_SIZE);
+        let value = format!("{hex_encapped_key}#{hex_ciphertext}");
+
+        let result = EncryptedData::from_hex(&value);
+        assert!(result.is_ok(), "ciphertext exactly at cap must be accepted");
+    }
+
+    #[test]
+    fn test_from_binary_accepts_ciphertext_at_cap() {
+        let key_size = Suite::P384.encapped_key_size();
+        let mut data = vec![0xABu8; key_size];
+        data.extend(vec![0xCDu8; MAX_FIELD_CIPHERTEXT_SIZE]);
+        let b64 = data_encoding::BASE64.encode(&data);
+
+        let result = EncryptedData::from_binary(&b64, &Suite::P384);
+        assert!(result.is_ok(), "ciphertext exactly at cap must be accepted");
     }
 
     #[test]
@@ -1448,11 +1560,11 @@ mod tests {
 
     #[test]
     fn test_credential_debug_redacts_all_fields() {
-        let credential = Credential {
-            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
-            session_token: "FwoGZXIvYXdzEBYaDHVzLWVhc3QtMSJHMEUCIQDExample".to_string(),
-        };
+        let credential = Credential::new(
+            "AKIAIOSFODNN7EXAMPLE".to_string(),
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            "FwoGZXIvYXdzEBYaDHVzLWVhc3QtMSJHMEUCIQDExample".to_string(),
+        );
 
         let debug_output = format!("{:?}", credential);
 
@@ -1480,11 +1592,11 @@ mod tests {
 
     #[test]
     fn test_credential_debug_format_structure() {
-        let credential = Credential {
-            access_key_id: "test_key_id".to_string(),
-            secret_access_key: "test_secret".to_string(),
-            session_token: "test_token".to_string(),
-        };
+        let credential = Credential::new(
+            "test_key_id".to_string(),
+            "test_secret".to_string(),
+            "test_token".to_string(),
+        );
 
         let debug_output = format!("{:?}", credential);
 
@@ -1509,11 +1621,11 @@ mod tests {
 
     #[test]
     fn test_enclave_request_debug_does_not_expose_credentials() {
-        let credential = Credential {
-            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
-            session_token: "FwoGZXIvYXdzEBYaDHVzLWVhc3QtMSJHMEUCIQDExample".to_string(),
-        };
+        let credential = Credential::new(
+            "AKIAIOSFODNN7EXAMPLE".to_string(),
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            "FwoGZXIvYXdzEBYaDHVzLWVhc3QtMSJHMEUCIQDExample".to_string(),
+        );
 
         let request = EnclaveRequest {
             credential,
