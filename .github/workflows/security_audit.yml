@@ -7,6 +7,8 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'deny.toml'
+      - '.github/workflows/security_audit.yml'
+  workflow_dispatch:
 jobs:
   security_audit:
     runs-on: ubuntu-24.04-arm
