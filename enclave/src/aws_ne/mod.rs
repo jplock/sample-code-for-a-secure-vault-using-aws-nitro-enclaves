@@ -173,6 +173,17 @@ impl KmsResources {
 /// by other in-flight KMS calls. The SDK automatically generates an attestation document
 /// and sends it to KMS for verification.
 ///
+/// # Encryption context
+///
+/// KMS encryption context is intentionally NOT bound here. The `aws-nitro-enclaves-sdk-c`
+/// library does not currently expose an FFI for it — see upstream
+/// <https://github.com/aws/aws-nitro-enclaves-sdk-c/issues/35>. The
+/// [`aws_kms_decrypt_blocking`](ffi::aws_kms_decrypt_blocking) signature has no parameter
+/// for it, and the matching `EncryptionContext={"vault_id": …}` on the encrypt side at
+/// `api/src/app/resources/kms.py:60-63` is therefore also commented out. Both sides must
+/// remain in sync: wire up encryption context here only after the upstream issue resolves
+/// AND the Python encrypt side is updated in the same release.
+///
 /// # Arguments
 ///
 /// * `aws_region` - AWS region (e.g., "us-east-1")

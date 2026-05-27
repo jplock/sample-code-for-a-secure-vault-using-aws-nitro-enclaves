@@ -105,6 +105,17 @@ pub fn date(ftx: &FunctionContext, This(this): This<Arc<String>>) -> ResolveResu
 ///
 /// This function is designed to never panic, returning a CEL error instead
 /// of using expect() on the infallible UTC offset operations.
+///
+/// # Threat model
+///
+/// This exposes the enclave's wall clock to the CEL expression caller. The
+/// parent already supplies the request and knows wall-clock time, so under
+/// the current threat model (parent trusted, CEL expressions authored by
+/// trusted operators) the marginal information leak is zero — the caller
+/// learns at most "the enclave clock agrees with mine to within request
+/// latency". If the model ever shifts to one where CEL expression authors
+/// are adversarial relative to the parent, treat this as a low-bandwidth
+/// side channel and remove the function. Same applies to [`age`].
 pub fn today_utc(ftx: &FunctionContext) -> ResolveResult {
     let now_utc = Utc::now();
 
@@ -131,6 +142,9 @@ pub fn today_utc(ftx: &FunctionContext) -> ResolveResult {
     Ok(dt_with_tz.into())
 }
 
+/// Returns the integer number of full years between `this` and the
+/// current UTC time. Like [`today_utc`], this reads the enclave clock;
+/// same threat-model note applies.
 pub fn age(This(this): This<DateTime<FixedOffset>>) -> ResolveResult {
     let now_local = Utc::now().with_timezone(this.offset());
 
