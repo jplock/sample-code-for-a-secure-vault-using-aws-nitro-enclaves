@@ -23,5 +23,8 @@ from enum import IntEnum
 
 
 class EncodingVersion(IntEnum):
+    # The integer values cross the vsock boundary as their str() form
+    # ("1", "2") inside the request payload. They MUST stay in lockstep
+    # with enclave/src/constants.rs::ENCODING_HEX / ENCODING_BINARY.
     HEX = 1  # hex(encap) + '#' + hex(ciphertext)
     BINARY = 2  # encap + ciphertext
