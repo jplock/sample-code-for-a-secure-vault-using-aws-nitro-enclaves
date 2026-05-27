@@ -89,7 +89,7 @@ cd parent && make build-docker  # Docker image
 
 ### Rust
 - Prefer `thiserror` for library error types, `anyhow` for application errors
-- Use `#[derive(Debug, Clone, Serialize, Deserialize)]` on data types
+- Use `#[derive(Debug, Clone, Serialize, Deserialize)]` on data types, but omit `Clone` for types holding secrets (e.g., `Credential`) to enforce single-owner zeroize-on-drop invariants
 - All public APIs must have doc comments
 - No `unwrap()` in production code; use `?` or explicit error handling
 
