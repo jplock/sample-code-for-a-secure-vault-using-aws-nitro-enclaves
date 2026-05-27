@@ -197,7 +197,7 @@ impl EnclaveRequest {
 
         // Get private key wrapped in SecureHpkePrivateKey for automatic zeroization
         let secure_private_key = self.get_private_key(&suite)?;
-        println!("[enclave] decrypted KMS secret key");
+        tracing::info!("decrypted KMS secret key");
 
         // Get the HpkePrivateKey for use with rustls HPKE operations
         // Note: This creates a short-lived copy; the secure wrapper's copy is zeroized on drop
@@ -210,8 +210,8 @@ impl EnclaveRequest {
         // Sensitive context logging gated behind debug builds only
         #[cfg(debug_assertions)]
         {
-            println!("[enclave] vault_id: {:?}", &self.request.vault_id);
-            println!("[enclave] encoding: {:?}", encoding);
+            tracing::debug!("vault_id: {:?}", &self.request.vault_id);
+            tracing::debug!("encoding: {:?}", encoding);
         }
 
         // First pass: parse all encrypted data (sequential, may fail early)
@@ -229,24 +229,28 @@ impl EnclaveRequest {
         let decrypted_fields: HashMap<String, Value> = parsed_fields
             .into_par_iter()
             .map(|(field, encrypted_data)| {
-                let decrypted =
-                    decrypt_value(hpke_suite, &private_key, info, field, encrypted_data)
-                        .unwrap_or_else(|error| {
-                            // Handle mutex lock - log if poisoned (indicates a panic occurred)
-                            match errors.lock() {
-                                Ok(mut err_vec) => err_vec.push(error),
-                                Err(poisoned) => {
-                                    // Mutex is poisoned - a thread panicked. Log and recover.
-                                    eprintln!(
-                                        "[enclave critical] mutex poisoned during decryption - \
-                                        a thread may have panicked"
-                                    );
-                                    // Recover the data and continue
-                                    poisoned.into_inner().push(error);
-                                }
-                            }
-                            Value::Null
-                        });
+                let decrypted = decrypt_value(
+                    hpke_suite,
+                    &private_key,
+                    info,
+                    field,
+                    encrypted_data,
+                )
+                .unwrap_or_else(|error| {
+                    // Handle mutex lock - log if poisoned (indicates a panic occurred)
+                    match errors.lock() {
+                        Ok(mut err_vec) => err_vec.push(error),
+                        Err(poisoned) => {
+                            // Mutex is poisoned - a thread panicked. Log and recover.
+                            tracing::error!(
+                                "mutex poisoned during decryption - a thread may have panicked"
+                            );
+                            // Recover the data and continue
+                            poisoned.into_inner().push(error);
+                        }
+                    }
+                    Value::Null
+                });
                 (field.clone(), decrypted)
             })
             .collect();
@@ -255,9 +259,8 @@ impl EnclaveRequest {
         let final_errors = match errors.into_inner() {
             Ok(errs) => errs,
             Err(poisoned) => {
-                eprintln!(
-                    "[enclave critical] mutex poisoned during final error extraction - \
-                    a thread may have panicked during decryption"
+                tracing::error!(
+                    "mutex poisoned during final error extraction - a thread may have panicked during decryption"
                 );
                 poisoned.into_inner()
             }

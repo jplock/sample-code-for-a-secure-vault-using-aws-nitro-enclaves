@@ -838,6 +838,8 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "tracing",
+ "tracing-subscriber",
  "vsock",
  "zeroize",
 ]

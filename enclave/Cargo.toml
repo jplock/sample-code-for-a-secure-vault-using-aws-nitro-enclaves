@@ -20,6 +20,9 @@ path = "src/main.rs"
 unwrap_used = "warn"
 expect_used = "warn"
 indexing_slicing = "warn"
+# Force all log output through tracing so it can be structured and routed.
+print_stdout = "deny"
+print_stderr = "deny"
 
 [dependencies]
 anyhow = { version = "=1.0.100", default-features = false }
@@ -37,6 +40,8 @@ rayon = { version = "=1.10.0", default-features = false }
 serde = { version = "=1.0.228", default-features = false, features = ["derive"] }
 serde_json = { version = "=1.0.145", default-features = false }
 rustls = { version = "=0.23.40", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum"] }
+tracing = { version = "=0.1.44", default-features = false, features = ["log"] }
+tracing-subscriber = { version = "=0.3.22", default-features = false, features = ["env-filter", "fmt", "json"] }
 vsock = { version = "=0.5.2", default-features = false }
 zeroize = { version = "=1.8.2", default-features = false, features = ["zeroize_derive"] }
 

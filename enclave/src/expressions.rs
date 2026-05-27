@@ -124,7 +124,7 @@ pub fn execute_expressions(
 
         // Only log expression results in debug builds to prevent sensitive data leakage
         #[cfg(debug_assertions)]
-        println!("[enclave] expression: {expression} = {result:?}");
+        tracing::debug!("expression: {expression} = {result:?}");
 
         transformed.insert(field.to_string(), result);
     }

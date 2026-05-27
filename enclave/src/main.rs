@@ -14,6 +14,7 @@ use enclave_vault::{
     protocol::{recv_message, send_message},
     utils::sanitize_error_message,
 };
+use tracing_subscriber::EnvFilter;
 use vsock::VsockListener;
 
 // Avoid musl's default allocator due to terrible performance
@@ -30,7 +31,7 @@ fn parse_payload(payload_buffer: &[u8]) -> Result<EnclaveRequest> {
 fn send_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
     // Sanitize before logging AND before including in the wire response.
     let sanitized_msg = sanitize_error_message(&err);
-    println!("[enclave error] {sanitized_msg}");
+    tracing::error!("{sanitized_msg}");
 
     // Build the response from the already-sanitized string so raw library
     // error text never reaches the vsock boundary.
@@ -41,14 +42,14 @@ fn send_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
 
     if let Err(err) = send_message(&mut stream, &payload) {
         let sanitized = sanitize_error_message(&err);
-        println!("[enclave error] failed to send error: {sanitized}");
+        tracing::error!("failed to send error: {sanitized}");
     }
 
     Ok(())
 }
 
 fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
-    println!("[enclave] handling client");
+    tracing::info!("handling client");
 
     let payload: EnclaveRequest = match recv_message(&mut stream)
         .map_err(|err| anyhow!("failed to receive message: {err:?}"))
@@ -79,10 +80,12 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
         Some(expressions) => match execute_expressions(&decrypted_fields, &expressions) {
             Ok((fields, errs)) => (fields, errs),
             Err(err) => {
-                println!("[enclave warning] expression execution failed");
+                tracing::warn!("expression execution failed");
                 // Only log error details in debug builds
                 #[cfg(debug_assertions)]
-                println!("[enclave debug] expression error: {:?}", err);
+                tracing::debug!("expression error: {:?}", err);
+                #[cfg(not(debug_assertions))]
+                let _ = err;
                 (decrypted_fields, Vec::new())
             }
         },
@@ -96,7 +99,7 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
     let payload: String = serde_json::to_string(&response)
         .map_err(|err| anyhow!("failed to serialize response: {err:?}"))?;
 
-    println!("[enclave] sending response to parent");
+    tracing::info!("sending response to parent");
 
     if let Err(err) = send_message(&mut stream, &payload)
         .map_err(|err| anyhow!("Failed to send message: {err:?}"))
@@ -104,30 +107,41 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
         return send_error(stream, err);
     }
 
-    println!("[enclave] finished client");
+    tracing::info!("finished client");
 
     Ok(())
 }
 
+fn init_tracing() {
+    // Mirror parent::main's setup: JSON, no ANSI, no timestamps (the
+    // parent's log shipper adds ingestion time), no current span, no
+    // target. RUST_LOG override is honored if set.
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(EnvFilter::new(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+        ))
+        .with_current_span(false)
+        .with_ansi(false)
+        .without_time()
+        .with_target(false)
+        .init();
+}
+
 fn main() -> Result<()> {
-    println!("[enclave] init");
+    init_tracing();
+    tracing::info!("init");
 
     let listener = match VsockListener::bind_with_cid_port(libc::VMADDR_CID_ANY, ENCLAVE_PORT) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!(
-                "[enclave fatal] failed to bind listener on port {}: {:?}",
-                ENCLAVE_PORT, e
-            );
+            tracing::error!("failed to bind listener on port {}: {:?}", ENCLAVE_PORT, e);
             std::process::exit(1);
         }
     };
 
-    println!("[enclave] listening on port {ENCLAVE_PORT}");
-    println!(
-        "[enclave] max concurrent connections: {}",
-        MAX_CONCURRENT_CONNECTIONS
-    );
+    tracing::info!("listening on port {ENCLAVE_PORT}");
+    tracing::info!("max concurrent connections: {}", MAX_CONCURRENT_CONNECTIONS);
 
     // Track active connections to prevent resource exhaustion DoS
     let active_connections = Arc::new(AtomicUsize::new(0));
@@ -141,15 +155,13 @@ fn main() -> Result<()> {
                 // this, a peer that opens a vsock connection and never sends
                 // a payload would tie up a thread until the kernel kills it.
                 if let Err(e) = stream.set_read_timeout(Some(VSOCK_IO_TIMEOUT)) {
-                    println!(
-                        "[enclave warning] failed to set vsock read timeout: {e:?}, rejecting connection"
-                    );
+                    tracing::warn!("failed to set vsock read timeout: {e:?}, rejecting connection");
                     drop(stream);
                     continue;
                 }
                 if let Err(e) = stream.set_write_timeout(Some(VSOCK_IO_TIMEOUT)) {
-                    println!(
-                        "[enclave warning] failed to set vsock write timeout: {e:?}, rejecting connection"
+                    tracing::warn!(
+                        "failed to set vsock write timeout: {e:?}, rejecting connection"
                     );
                     drop(stream);
                     continue;
@@ -168,9 +180,10 @@ fn main() -> Result<()> {
                 let prev = active_connections.fetch_add(1, Ordering::Relaxed);
                 if prev >= MAX_CONCURRENT_CONNECTIONS {
                     active_connections.fetch_sub(1, Ordering::Relaxed);
-                    println!(
-                        "[enclave warning] connection limit reached ({}/{}), rejecting",
-                        prev, MAX_CONCURRENT_CONNECTIONS
+                    tracing::warn!(
+                        "connection limit reached ({}/{}), rejecting",
+                        prev,
+                        MAX_CONCURRENT_CONNECTIONS
                     );
                     // Drop the stream to close the connection
                     drop(stream);
@@ -182,14 +195,14 @@ fn main() -> Result<()> {
                 thread::spawn(move || {
                     if let Err(err) = handle_client(stream) {
                         let sanitized = sanitize_error_message(&err);
-                        println!("[enclave error] {sanitized}");
+                        tracing::error!("{sanitized}");
                     }
                     // Decrement connection count when done
                     connections.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(e) => {
-                println!("[enclave error] failed to accept connection: {:?}", e);
+                tracing::error!("failed to accept connection: {:?}", e);
                 continue;
             }
         }
