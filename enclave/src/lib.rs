@@ -8,6 +8,10 @@
 // the module to `pub(crate)` surfaces spurious dead-code warnings for the
 // FFI surface on non-musl host builds (where the cfg-gated impls don't
 // compile).
+//
+// Wire protocol (framing + Request/Response types) lives in the
+// `vault-protocol` workspace crate; re-export through here would be
+// noise, so `main.rs` imports `vault_protocol::…` directly.
 pub mod aws_ne;
 pub mod constants;
 pub mod expressions;
@@ -15,5 +19,4 @@ pub(crate) mod functions;
 pub(crate) mod hpke;
 pub(crate) mod kms;
 pub mod models;
-pub mod protocol;
 pub mod utils;

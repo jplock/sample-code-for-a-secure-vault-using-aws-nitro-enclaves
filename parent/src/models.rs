@@ -11,13 +11,10 @@
 //! All request types implement validation via the [`validator`] crate.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
-use aws_credential_types::Credentials;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
-use zeroize::ZeroizeOnDrop;
 
 use crate::constants::{
     MAX_ENCODING_LENGTH, MAX_ENCRYPTED_KEY_LENGTH, MAX_EXPRESSIONS_COUNT, MAX_FIELDS_COUNT,
@@ -118,57 +115,12 @@ pub struct EnclaveBuildInfo {
     pub measurements: BTreeMap<String, String>,
 }
 
-/// AWS IAM credentials for accessing AWS services from within the enclave.
-///
-/// This struct is automatically zeroized when dropped to prevent credentials
-/// from lingering in memory. The [`Debug`] implementation redacts all fields
-/// to prevent accidental logging of sensitive data.
-///
-/// # Security
-///
-/// - All fields are zeroized on drop via [`ZeroizeOnDrop`]
-/// - Debug output shows `[REDACTED]` for all fields
-/// - Session tokens are required for temporary credentials
-#[derive(Clone, Serialize, Deserialize, ZeroizeOnDrop)]
-pub struct Credential {
-    /// AWS access key ID (e.g., "AKIAIOSFODNN7EXAMPLE")
-    #[serde(rename = "AccessKeyId")]
-    pub access_key_id: String,
-
-    /// AWS secret access key (sensitive)
-    #[serde(rename = "SecretAccessKey")]
-    pub secret_access_key: String,
-
-    /// Session token for temporary credentials (sensitive)
-    #[serde(rename = "Token")]
-    pub session_token: String,
-}
-
-/// Custom Debug implementation to prevent accidental logging of sensitive data.
-impl fmt::Debug for Credential {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Credential")
-            .field("access_key_id", &"[REDACTED]")
-            .field("secret_access_key", &"[REDACTED]")
-            .field("session_token", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl From<Credentials> for Credential {
-    fn from(credential: Credentials) -> Self {
-        let token = match credential.session_token() {
-            Some(token) => token.to_string(),
-            None => "".to_string(),
-        };
-
-        Self {
-            access_key_id: credential.access_key_id().to_string(),
-            secret_access_key: credential.secret_access_key().to_string(),
-            session_token: token,
-        }
-    }
-}
+// AWS credentials flow through the parent as `aws_credential_types::Credentials`
+// directly — see `crate::imds::CredentialCache`. The parent runs on a trusted EC2
+// host with filesystem access, so the wrapper that previously added Debug-
+// redaction and ZeroizeOnDrop here didn't materially raise the bar. At the vsock
+// boundary, `crate::routes::decrypt` builds a `vault_protocol::Credential` (which
+// IS non-Clone + ZeroizeOnDrop) from the SDK type before forwarding.
 
 /// Decrypt request received from the API tier.
 ///
@@ -291,30 +243,11 @@ pub struct ParentResponse {
     pub errors: Option<Vec<String>>,
 }
 
-/// Request sent to the enclave over vsock.
-///
-/// Combines the original decrypt request with AWS credentials needed
-/// for KMS access within the enclave.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnclaveRequest {
-    /// AWS credentials for KMS access.
-    pub credential: Credential,
-
-    /// The original decrypt request.
-    pub request: ParentRequest,
-}
-
-/// Response received from the enclave over vsock.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnclaveResponse {
-    /// Map of field names to decrypted values (if successful).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fields: Option<BTreeMap<String, Value>>,
-
-    /// List of errors encountered during decryption (if any).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub errors: Option<Vec<String>>,
-}
+// The enclave-bound wire types (`EnclaveRequest`, `EnclaveResponse`)
+// now live in the `vault_protocol` workspace crate so they cannot drift
+// between the parent and the enclave. The parent assembles a
+// `vault_protocol::EnclaveRequest` via `crate::wire_encoding::build_enclave_request`
+// when forwarding an API request to the enclave.
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -532,34 +465,6 @@ mod tests {
         assert!(request.validate().is_err());
     }
 
-    // ==================== Credential Tests ====================
-
-    #[test]
-    fn test_credential_debug_redacts_all_fields() {
-        let cred = Credential {
-            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
-            session_token: "session_token_value".to_string(),
-        };
-        let debug = format!("{:?}", cred);
-
-        assert!(!debug.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(!debug.contains("wJalrXUtnFEMI"));
-        assert!(!debug.contains("session_token_value"));
-        assert!(debug.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn test_credential_clone() {
-        let cred = Credential {
-            access_key_id: "AKIA123".to_string(),
-            secret_access_key: "secret".to_string(),
-            session_token: "token".to_string(),
-        };
-        let cloned = cred.clone();
-        assert_eq!(cloned.access_key_id, "AKIA123");
-    }
-
     // ==================== Serialization Tests ====================
 
     #[test]
@@ -616,19 +521,6 @@ mod tests {
         let info: EnclaveRunInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.enclave_name, "enclave-vault-1");
         assert_eq!(info.cpu_count, 2);
-    }
-
-    #[test]
-    fn test_credential_serialization() {
-        let cred = Credential {
-            access_key_id: "AKIA123".to_string(),
-            secret_access_key: "secret".to_string(),
-            session_token: "token".to_string(),
-        };
-        let json = serde_json::to_string(&cred).unwrap();
-        assert!(json.contains("AccessKeyId"));
-        assert!(json.contains("SecretAccessKey"));
-        assert!(json.contains("Token"));
     }
 
     #[test]

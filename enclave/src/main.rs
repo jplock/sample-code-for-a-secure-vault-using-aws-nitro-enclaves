@@ -6,14 +6,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use anyhow::{Error, Result, anyhow};
+use anyhow::{Error, Result};
 use enclave_vault::{
     constants::{ENCLAVE_PORT, MAX_CONCURRENT_CONNECTIONS, VSOCK_IO_TIMEOUT},
     expressions::{execute_expressions, validate_expressions_count},
-    models::{EnclaveRequest, EnclaveResponse},
-    protocol::{recv_message, send_message},
+    models::decrypt_fields,
     utils::sanitize_error_message,
 };
+use vault_protocol::{EnclaveResponse, recv_request, send_response};
 use vsock::VsockListener;
 
 // Avoid musl's default allocator due to terrible performance
@@ -21,13 +21,7 @@ use vsock::VsockListener;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn parse_payload(payload_buffer: &[u8]) -> Result<EnclaveRequest> {
-    let payload: EnclaveRequest = serde_json::from_slice(payload_buffer)
-        .map_err(|err| anyhow!("failed to deserialize payload: {err:?}"))?;
-    Ok(payload)
-}
-
-fn send_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
+fn send_sanitized_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
     // Sanitize before logging AND before including in the wire response.
     let sanitized_msg = sanitize_error_message(&err);
     println!("[enclave error] {sanitized_msg}");
@@ -36,10 +30,7 @@ fn send_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
     // error text never reaches the vsock boundary.
     let response = EnclaveResponse::error_msg(sanitized_msg);
 
-    let payload: String = serde_json::to_string(&response)
-        .map_err(|err| anyhow!("failed to serialize error response: {err:?}"))?;
-
-    if let Err(err) = send_message(&mut stream, &payload) {
+    if let Err(err) = send_response(&mut stream, &response) {
         let sanitized = sanitize_error_message(&err);
         println!("[enclave error] failed to send error: {sanitized}");
     }
@@ -50,14 +41,9 @@ fn send_error<W: Write>(mut stream: W, err: Error) -> Result<()> {
 fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
     println!("[enclave] handling client");
 
-    let payload: EnclaveRequest = match recv_message(&mut stream)
-        .map_err(|err| anyhow!("failed to receive message: {err:?}"))
-    {
-        Ok(payload_buffer) => match parse_payload(&payload_buffer) {
-            Ok(payload) => payload,
-            Err(err) => return send_error(stream, err),
-        },
-        Err(err) => return send_error(stream, err),
+    let payload = match recv_request(&mut stream) {
+        Ok(payload) => payload,
+        Err(err) => return send_sanitized_error(stream, err),
     };
 
     // Bound the number of CEL expressions before any decrypt work — a request
@@ -66,13 +52,13 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
     if let Some(ref expressions) = payload.request.expressions
         && let Err(err) = validate_expressions_count(expressions.len())
     {
-        return send_error(stream, err);
+        return send_sanitized_error(stream, err);
     }
 
     // Decrypt the individual field values (uses rayon for parallelization internally)
-    let (decrypted_fields, errors) = match payload.decrypt_fields() {
+    let (decrypted_fields, errors) = match decrypt_fields(&payload) {
         Ok(result) => result,
-        Err(err) => return send_error(stream, err),
+        Err(err) => return send_sanitized_error(stream, err),
     };
 
     let (final_fields, cel_errors) = match payload.request.expressions {
@@ -83,6 +69,8 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
                 // Only log error details in debug builds
                 #[cfg(debug_assertions)]
                 println!("[enclave debug] expression error: {:?}", err);
+                #[cfg(not(debug_assertions))]
+                let _ = err;
                 (decrypted_fields, Vec::new())
             }
         },
@@ -90,18 +78,23 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
     };
 
     // Merge per-field decryption errors with CEL expression errors.
-    let all_errors: Vec<_> = errors.into_iter().chain(cel_errors).collect();
-    let response = EnclaveResponse::new(final_fields, Some(all_errors));
+    let sanitized_errors: Vec<String> = errors
+        .into_iter()
+        .chain(cel_errors)
+        .map(|e| sanitize_error_message(&e))
+        .collect();
+    let errors_field = if sanitized_errors.is_empty() {
+        None
+    } else {
+        Some(sanitized_errors)
+    };
 
-    let payload: String = serde_json::to_string(&response)
-        .map_err(|err| anyhow!("failed to serialize response: {err:?}"))?;
+    let response = EnclaveResponse::new(final_fields, errors_field);
 
     println!("[enclave] sending response to parent");
 
-    if let Err(err) = send_message(&mut stream, &payload)
-        .map_err(|err| anyhow!("Failed to send message: {err:?}"))
-    {
-        return send_error(stream, err);
+    if let Err(err) = send_response(&mut stream, &response) {
+        return send_sanitized_error(stream, err);
     }
 
     println!("[enclave] finished client");
@@ -172,7 +165,6 @@ fn main() -> Result<()> {
                         "[enclave warning] connection limit reached ({}/{}), rejecting",
                         prev, MAX_CONCURRENT_CONNECTIONS
                     );
-                    // Drop the stream to close the connection
                     drop(stream);
                     continue;
                 }
@@ -184,7 +176,6 @@ fn main() -> Result<()> {
                         let sanitized = sanitize_error_message(&err);
                         println!("[enclave error] {sanitized}");
                     }
-                    // Decrement connection count when done
                     connections.fetch_sub(1, Ordering::Relaxed);
                 });
             }

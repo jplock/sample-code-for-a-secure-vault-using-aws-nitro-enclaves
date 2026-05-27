@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "enclave",
-    "parent"
+    "parent",
+    "vault-protocol",
 ]
 resolver = "2"
 

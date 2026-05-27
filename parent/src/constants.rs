@@ -48,10 +48,8 @@ pub const IMDS_TOKEN_TTL: Duration = Duration::from_secs(300);
 /// to ensure uninterrupted access to AWS services.
 pub const CREDENTIAL_REFRESH_BUFFER: Duration = Duration::from_secs(60);
 
-/// Maximum size in bytes for messages sent over vsock.
-///
-/// Messages larger than this limit will be rejected to prevent memory exhaustion.
-pub const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024;
+// vsock message-size cap lives in `vault_protocol::MAX_FRAME_BODY_SIZE`,
+// shared with the enclave so both ends agree on the bound.
 
 /// Maximum length of the `vault_id` field in [`crate::models::ParentRequest`].
 pub const MAX_VAULT_ID_LENGTH: u64 = 256;

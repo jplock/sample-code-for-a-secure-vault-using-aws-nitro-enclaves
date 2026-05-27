@@ -25,20 +25,16 @@
 
 use std::time::Duration;
 
-use serde_json::json;
 use tokio::{process::Command, sync::RwLock};
+use vault_protocol::{EnclaveRequest, EnclaveResponse, recv_response, send_request};
 use vsock::{VsockAddr, VsockStream};
 
 use crate::constants::{
-    ENCLAVE_PREFIX, MAX_ENCLAVES_PER_INSTANCE, RUN_ENCLAVE_CPU_COUNT, RUN_ENCLAVE_EIF_PATH,
+    self, ENCLAVE_PREFIX, MAX_ENCLAVES_PER_INSTANCE, RUN_ENCLAVE_CPU_COUNT, RUN_ENCLAVE_EIF_PATH,
     RUN_ENCLAVE_MEMORY_SIZE,
 };
+use crate::errors::AppError;
 use crate::models::{EnclaveDescribeInfo, EnclaveRunInfo};
-use crate::{constants, errors::AppError, models::EnclaveRequest};
-use crate::{
-    models::EnclaveResponse,
-    protocol::{recv_message, send_message},
-};
 
 /// Read/write timeout applied to every [`VsockStream`] used to talk to an enclave.
 ///
@@ -231,17 +227,11 @@ impl Enclaves {
 
         tracing::debug!("[parent] connected to CID {} and port {}", cid, port);
 
-        // Serialize and send request
-        let msg = json!(payload).to_string();
+        // Frame and send the request (CBOR body inside a version+type+len header).
+        send_request(&mut stream, &payload)?;
 
-        tracing::trace!("[parent] sending message ({} bytes)", msg.len());
-
-        send_message(&mut stream, msg)?;
-
-        // Receive and deserialize response
-        let response = recv_message(&mut stream)?;
-
-        let result: EnclaveResponse = serde_json::from_slice(&response)?;
+        // Receive and deserialize the response.
+        let result = recv_response(&mut stream)?;
 
         tracing::trace!(
             "[parent] received response with {} fields",

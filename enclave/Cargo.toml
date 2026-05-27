@@ -25,6 +25,7 @@ indexing_slicing = "warn"
 anyhow = { version = "=1.0.100", default-features = false }
 libc = { version = "=0.2.178", default-features = false }
 aws-lc-rs = { version = "=1.17.0", default-features = false }
+vault-protocol = { path = "../vault-protocol" }
 cel-interpreter = { version = "=0.10.0", default-features = false, features = ["json", "chrono"] }
 # Direct dep solely because cel-interpreter's "chrono" feature exposes
 # chrono types (DateTime<FixedOffset>, etc.) through its public API, which

@@ -1,0 +1,27 @@
+[package]
+name = "vault-protocol"
+version = "0.1.0"
+authors = ["Justin Plock <jplock@smoketurner.com>"]
+description = "Wire protocol between the parent and the Nitro Enclave (length-framed, versioned, CBOR-serialized)"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+license = "MIT-0"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+indexing_slicing = "warn"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[dependencies]
+anyhow = { version = "=1.0.100", default-features = false, features = ["std"] }
+ciborium = { version = "=0.2.2", default-features = false }
+serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "=1.0.145", default-features = false, features = ["std"] }
+tracing = { version = "=0.1.44", default-features = false, features = ["attributes"] }
+zeroize = { version = "=1.8.2", default-features = false, features = ["zeroize_derive"] }
+
+[dev-dependencies]
+proptest = { version = "=1.9.0", default-features = false, features = ["std"] }

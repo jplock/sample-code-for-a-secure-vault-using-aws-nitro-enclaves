@@ -34,8 +34,14 @@
 //! - [`errors`]: Application error types with HTTP response mapping
 //! - [`imds`]: IAM credential caching from EC2 Instance Metadata Service
 //! - [`models`]: Request/response types with validation
-//! - [`protocol`]: vsock message framing protocol (length-prefixed)
+//! - [`wire_encoding`]: Decodes the API's encoded fields into the
+//!   binary form the enclave consumes (`vault_protocol::EncryptedField`,
+//!   `vault_protocol::Suite`). Lifts what used to be enclave-side parsing
+//!   up to the trust boundary.
 //! - [`routes`]: HTTP route handlers (health, decrypt, get_enclaves)
+//!
+//! The on-the-wire protocol (length-framed CBOR) lives in the
+//! [`vault_protocol`] workspace crate, shared with the enclave.
 //!
 //! ## Usage
 //!
@@ -58,5 +64,5 @@ pub mod enclaves;
 pub mod errors;
 pub mod imds;
 pub mod models;
-pub mod protocol;
 pub mod routes;
+pub mod wire_encoding;

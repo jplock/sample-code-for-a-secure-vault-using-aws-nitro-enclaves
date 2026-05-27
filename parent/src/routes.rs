@@ -20,16 +20,15 @@ use std::sync::Arc;
 use crate::application::AppState;
 use crate::constants;
 use crate::errors::AppError;
-use crate::models::{
-    Credential, EnclaveDescribeInfo, EnclaveRequest, EnclaveResponse, EnclaveRunInfo,
-    ParentRequest, ParentResponse,
-};
+use crate::models::{EnclaveDescribeInfo, EnclaveRunInfo, ParentRequest, ParentResponse};
+use crate::wire_encoding::build_enclave_request;
 
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use serde_json::json;
 use validator::Validate;
+use vault_protocol::{Credential as WireCredential, EnclaveResponse};
 
 /// Health check endpoint.
 ///
@@ -76,20 +75,11 @@ pub async fn run_enclave(
     Ok(Json(run_info))
 }
 
-/// Returns the current IAM credentials.
-///
-/// This endpoint is currently disabled in the router configuration.
-///
-/// # Response
-///
-/// Returns [`Credential`] on success.
-#[tracing::instrument(skip(state))]
-pub async fn get_credentials(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Credential>, AppError> {
-    let credentials = state.credentials.get_credentials().await?;
-    Ok(Json(credentials))
-}
+// The `/creds` route handler that previously returned IAM credentials
+// as JSON has been removed. It was always disabled at the router and
+// `aws_credential_types::Credentials` (the SDK type we now hold) does
+// not implement `Serialize`, which is appropriate — credentials should
+// not be observable from outside this process.
 
 /// Decrypts vault fields using a Nitro Enclave.
 ///
@@ -139,10 +129,23 @@ pub async fn decrypt(
     })?;
     tracing::debug!("[parent] credentials retrieved successfully");
 
-    let request = EnclaveRequest {
-        credential,
-        request,
-    };
+    // Translate the SDK `Credentials` into the wire crate's typed,
+    // zeroize-on-drop `Credential` (orphan rules prevent an `impl From`
+    // here), then build the binary EnclaveRequest. Decoding all
+    // base64/hex envelopes at this boundary means the enclave never
+    // sees encoded strings.
+    let wire_credential = WireCredential::new(
+        credential.access_key_id().to_string(),
+        credential.secret_access_key().to_string(),
+        credential.session_token().unwrap_or_default().to_string(),
+    );
+    let request = build_enclave_request(request, wire_credential).map_err(|e| {
+        tracing::error!(
+            "[parent] failed to translate request to wire format: {:?}",
+            e
+        );
+        AppError::ValidationError(e.to_string())
+    })?;
 
     // 4. Select a random enclave for load balancing
     let index = fastrand::usize(..enclaves.len());
@@ -172,9 +175,11 @@ pub async fn decrypt(
 
     tracing::debug!("[parent] received response from CID: {:?}", cid);
 
-    // 6. Transform enclave response to parent response format
+    // 6. Transform enclave response to parent response format. The
+    // enclave returns a HashMap (no ordering guarantee); the API returns
+    // a BTreeMap so the JSON output is deterministic for clients.
     let response = ParentResponse {
-        fields: response.fields.unwrap_or_default(),
+        fields: response.fields.unwrap_or_default().into_iter().collect(),
         errors: response.errors,
     };
 
