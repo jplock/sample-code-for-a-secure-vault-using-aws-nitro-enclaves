@@ -1683,7 +1683,6 @@ dependencies = [
  "validator",
  "vault-protocol",
  "vsock",
- "zeroize",
 ]
 
 [[package]]
