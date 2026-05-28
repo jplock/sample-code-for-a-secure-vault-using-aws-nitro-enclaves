@@ -31,9 +31,8 @@ opt-level = "z"   # Optimize for size (more aggressive than "s")
 # (and remember `panic = "abort"` in the release profile turns any
 # panic into an immediate process kill, which is fatal in the sealed
 # enclave) is denied. Code that legitimately needs an exception MUST
-# annotate it with `#[allow(clippy::lint, reason = "…")]` — the bare
-# `#[allow]` form is denied via `allow_attributes` so every exception
-# carries its own justification at the site of use.
+# annotate it with `#[allow(clippy::lint, reason = "…")]`; every
+# exception must carry its own justification at the site of use.
 [workspace.lints.clippy]
 # Panic prevention
 unwrap_used = "deny"
