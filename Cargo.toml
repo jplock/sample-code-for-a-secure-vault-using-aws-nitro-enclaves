@@ -13,6 +13,47 @@ codegen-units = 1 # Maximize size reduction optimizations
 panic = "abort"   # Terminate process upon panic
 opt-level = "z"   # Optimize for size (more aggressive than "s")
 
+# Lints shared by every member crate. Each crate's manifest opts in via
+# `[lints] workspace = true` so the rules can't drift per-crate.
+#
+# The focus is panic prevention: every cheap path to an aborting panic
+# (and remember `panic = "abort"` in the release profile turns any
+# panic into an immediate process kill, which is fatal in the sealed
+# enclave) is denied. Code that legitimately needs an exception MUST
+# annotate it with `#[allow(clippy::lint, reason = "…")]` — the bare
+# `#[allow]` form is denied via `allow_attributes` so every exception
+# carries its own justification at the site of use.
+[workspace.lints.clippy]
+# Panic prevention
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+panic_in_result_fn = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+todo = "deny"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+
+# Code hygiene / discipline
+dbg_macro = "deny"
+# Note: we intentionally do NOT enable `allow_attributes` — pushing every
+# `#[allow]` to `#[expect]` adds maintenance cost (lints must keep firing
+# or the build breaks) without a panic-prevention benefit. Each `#[allow]`
+# in this codebase carries an explicit `reason = "..."` justification.
+
+# Safety
+exit = "deny"
+mem_forget = "deny"
+await_holding_lock = "deny"
+large_futures = "deny"
+
+# I/O discipline — all output must go through `tracing` (parent) or be
+# explicitly justified (enclave's intentional stdout/stderr per
+# .claude memory). Direct print! macros are caught at the file level.
+print_stdout = "deny"
+print_stderr = "deny"
+
 # Single source of truth for every external dependency version in the
 # workspace. The root only pins the exact version and disables default
 # features; each member crate declares the features it actually needs.

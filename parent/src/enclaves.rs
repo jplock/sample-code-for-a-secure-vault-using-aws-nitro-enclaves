@@ -130,7 +130,10 @@ impl Enclaves {
 
         // Launch additional enclaves if needed
         if !skip_run_enclaves {
-            let delta = MAX_ENCLAVES_PER_INSTANCE - enclaves.len();
+            // saturating_sub: if somehow more enclaves are already running than
+            // MAX_ENCLAVES_PER_INSTANCE (shouldn't happen, but the lint won't
+            // assume that), we just launch zero.
+            let delta = MAX_ENCLAVES_PER_INSTANCE.saturating_sub(enclaves.len());
             if delta > 0 {
                 tracing::debug!("[parent] launching {} enclaves", delta);
                 for _ in 0..delta {

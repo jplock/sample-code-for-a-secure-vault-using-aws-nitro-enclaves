@@ -30,7 +30,10 @@ fn create_test_server() -> TestServer {
 /// Returns a valid decrypt request JSON for testing.
 ///
 /// The returned JSON contains all required fields with valid values.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "helper kept for future integration tests; not all tests in this file consume it"
+)]
 fn valid_decrypt_request() -> serde_json::Value {
     serde_json::json!({
         "vault_id": "v_test_123",

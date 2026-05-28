@@ -10,7 +10,8 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    println!("[parent] init");
+    // (Initial "init" message removed; tracing::info!("[parent] {:?}", &options)
+    // below runs after the subscriber is up and gets shipped to CloudWatch.)
 
     tracing_subscriber::fmt()
         .json()

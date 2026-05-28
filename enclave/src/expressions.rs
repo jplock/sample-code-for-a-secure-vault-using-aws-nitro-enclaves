@@ -75,7 +75,7 @@ pub fn execute_expressions(
     context.add_function("age", functions::age);
 
     let mut transformed: HashMap<String, Value> =
-        HashMap::with_capacity(fields.len() + expressions.len());
+        HashMap::with_capacity(fields.len().saturating_add(expressions.len()));
     let mut cel_errors: Vec<anyhow::Error> = Vec::new();
 
     for (field, decrypted_value) in fields {
@@ -124,7 +124,13 @@ pub fn execute_expressions(
 
         // Only log expression results in debug builds to prevent sensitive data leakage
         #[cfg(debug_assertions)]
-        println!("[enclave] expression: {expression} = {result:?}");
+        #[allow(
+            clippy::print_stdout,
+            reason = "enclave stdout is the only diagnostic channel in --debug-mode; production stdout is discarded — see .claude memory `enclave-no-observability`"
+        )]
+        {
+            println!("[enclave] expression: {expression} = {result:?}");
+        }
 
         transformed.insert(field.to_string(), result);
     }
@@ -133,7 +139,12 @@ pub fn execute_expressions(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests use unwrap/expect/indexing for terseness"
+)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

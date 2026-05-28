@@ -14,12 +14,9 @@ path = "src/lib.rs"
 name = "enclave-vault"
 path = "src/main.rs"
 
-# Clippy lints for no-panic Rust hardening
-# These help catch panic-prone patterns at compile time
-[lints.clippy]
-unwrap_used = "warn"
-expect_used = "warn"
-indexing_slicing = "warn"
+# Lints are defined once in the root workspace manifest.
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = { workspace = true }

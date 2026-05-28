@@ -181,7 +181,11 @@ pub fn build_enclave_request(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests use unwrap/expect for terseness"
+)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
