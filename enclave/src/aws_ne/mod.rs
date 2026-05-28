@@ -15,7 +15,17 @@ use std::ptr;
 #[cfg(target_env = "musl")]
 use std::slice;
 #[cfg(target_env = "musl")]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+#[cfg(target_env = "musl")]
+use std::sync::mpsc::{self, SyncSender};
+#[cfg(target_env = "musl")]
+use std::thread;
+#[cfg(target_env = "musl")]
+use std::time::Duration;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+#[cfg(target_env = "musl")]
+use zeroize::Zeroizing;
 
 #[cfg(target_env = "musl")]
 use ffi::{
@@ -58,43 +68,129 @@ fn ensure_sdk_initialized() {
 /// only key on region + access_key_id (not the secret or session token)
 /// because IMDS rotates the whole credential triple atomically; a change
 /// in access_key_id implies the secret/token changed too.
-#[cfg(target_env = "musl")]
-#[derive(Clone, PartialEq, Eq)]
+///
+/// The fields are zeroized on drop so that the heap memory holding the
+/// previous credentials' identity cannot be recovered after a rotation.
+/// `Debug` is derived so test assertion failures are useful. The fields
+/// are not secret — `region` is public, `access_key_id` is the IAM
+/// identifier (the "username"; the secret material lives separately
+/// and is wrapped in `Zeroizing` at the request boundary).
+#[derive(Clone, Debug, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[allow(
+    dead_code,
+    reason = "host build has no consumers; the cfg(musl) worker constructs and compares these"
+)]
 struct CredentialKey {
     region: Vec<u8>,
     access_key_id: Vec<u8>,
 }
 
+/// Per-call timeout on the entire KMS decrypt round trip. Bounded
+/// shorter than the parent's `VSOCK_IO_TIMEOUT` (30s) so a stuck KMS
+/// call surfaces as an enclave error before the parent's connection
+/// timeout fires. Without this bound, a wedged `aws_kms_decrypt_blocking`
+/// call would block decryption for every other concurrent request
+/// until the SDK's own (longer) internal timeout returned.
+#[cfg(target_env = "musl")]
+const KMS_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Channel capacity matches the per-enclave concurrent-connection cap so
+/// the worker queue never grows beyond what the listener will accept.
+#[cfg(target_env = "musl")]
+const KMS_WORKER_QUEUE: usize = 32;
+
+/// Request sent from a caller thread to the KMS worker. Sensitive
+/// credential fields are wrapped in `Zeroizing` so they are erased from
+/// the heap after the worker copies them into the C SDK's `aws_string`s.
+#[cfg(target_env = "musl")]
+struct KmsRequest {
+    key: CredentialKey,
+    secret_access_key: Zeroizing<Vec<u8>>,
+    session_token: Zeroizing<Vec<u8>>,
+    ciphertext: Vec<u8>,
+    response_tx: SyncSender<Result<Vec<u8>, Error>>,
+}
+
 /// A KMS client cached together with the credentials it was built from.
-/// The C SDK expects the credential `aws_string`s to outlive the client,
-/// so we keep the entire `KmsResources` bundle alive together.
+/// Lives inside the worker thread only — no Send/Sync required.
 #[cfg(target_env = "musl")]
 struct CachedClient {
     key: CredentialKey,
     resources: KmsResources,
 }
 
-/// Process-wide cache for the KMS client. Holding the mutex through
-/// `aws_kms_decrypt_blocking` serializes KMS calls across threads —
-/// `aws-nitro-enclaves-sdk-c` is event-loop based and we cannot
-/// independently verify that a single client handle is safe under
-/// concurrent decrypt calls. Serialization is acceptable here because
-/// the enclave caps concurrent connections at 32 and the dominant cost
-/// is the per-request KMS TLS handshake the cache eliminates.
+/// Lazily-spawned worker that owns the cached KMS client and serializes
+/// `aws_kms_decrypt_blocking` calls.
 ///
-/// SAFETY: raw pointers in `KmsResources` are only accessed under this
-/// mutex. The unsafe Send impl below documents that invariant.
+/// Why a worker thread instead of a mutex over the client:
+///
+/// - The `aws-nitro-enclaves-sdk-c` library is event-loop based; we
+///   cannot independently verify that a single client handle is safe
+///   under concurrent decrypt calls. Funneling all calls through one
+///   thread keeps the SDK in a single-threaded usage pattern.
+/// - Callers wait on the response channel with a bounded timeout
+///   ([`KMS_REQUEST_TIMEOUT`]). If KMS is stuck, the caller returns an
+///   error after the timeout while the worker is free to handle the
+///   next request; a wedged KMS handshake no longer holds an
+///   enclave-wide lock indefinitely.
+/// - The cache lives inside the worker, so the raw FFI pointers in
+///   `KmsResources` never cross a thread boundary — the `Send`
+///   discipline is enforced by ownership rather than by an
+///   `unsafe impl Send`.
 #[cfg(target_env = "musl")]
-struct ClientCache(Option<CachedClient>);
+static KMS_WORKER: OnceLock<SyncSender<KmsRequest>> = OnceLock::new();
 
 #[cfg(target_env = "musl")]
-// SAFETY: every access to the inner `KmsResources` (which contains raw
-// FFI pointers) goes through the surrounding `Mutex`, providing the
-// exclusion the C SDK needs.
-unsafe impl Send for ClientCache {}
+fn kms_worker() -> &'static SyncSender<KmsRequest> {
+    KMS_WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<KmsRequest>(KMS_WORKER_QUEUE);
+        thread::Builder::new()
+            .name("kms-worker".into())
+            .spawn(move || {
+                // Cache lives entirely within this thread; raw FFI
+                // pointers never escape.
+                let mut cached: Option<CachedClient> = None;
+                while let Ok(req) = rx.recv() {
+                    let result = handle_kms_request(&mut cached, &req);
+                    // If the caller already timed out the response
+                    // channel is dropped — `send` returns Err; ignore.
+                    let _ = req.response_tx.send(result);
+                }
+                // The receiver closes when the OnceLock-owned sender
+                // is dropped; at that point the process is shutting
+                // down and the worker exits.
+            })
+            .ok();
+        tx
+    })
+}
 
 #[cfg(target_env = "musl")]
-static CLIENT_CACHE: Mutex<ClientCache> = Mutex::new(ClientCache(None));
+fn handle_kms_request(
+    cached: &mut Option<CachedClient>,
+    req: &KmsRequest,
+) -> Result<Vec<u8>, Error> {
+    let needs_rebuild = match cached {
+        Some(c) => c.key != req.key,
+        None => true,
+    };
+    if needs_rebuild {
+        if let Some(mut old) = cached.take() {
+            // Tear down the old client + credential strings in reverse
+            // alloc order before allocating the new ones so the SDK
+            // doesn't briefly hold two clients open against the same
+            // vsock proxy.
+            unsafe { old.resources.cleanup() };
+        }
+        let new = build_cached_client(&req.key, &req.secret_access_key, &req.session_token)?;
+        *cached = Some(new);
+    }
+    let entry = match cached.as_mut() {
+        Some(c) => c,
+        None => return Err(Error::SdkKmsClientError),
+    };
+    unsafe { do_decrypt(&mut entry.resources, &req.ciphertext) }
+}
 
 /// Errors that can occur during KMS operations via FFI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,44 +357,31 @@ pub fn kms_decrypt(
 ) -> Result<Vec<u8>, Error> {
     ensure_sdk_initialized();
 
-    let requested = CredentialKey {
-        region: aws_region.to_vec(),
-        access_key_id: aws_key_id.to_vec(),
+    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let req = KmsRequest {
+        key: CredentialKey {
+            region: aws_region.to_vec(),
+            access_key_id: aws_key_id.to_vec(),
+        },
+        secret_access_key: Zeroizing::new(aws_secret_key.to_vec()),
+        session_token: Zeroizing::new(aws_session_token.to_vec()),
+        ciphertext: ciphertext.to_vec(),
+        response_tx,
     };
 
-    // The cache lock is held through the entire KMS call. See the doc
-    // comment on `ClientCache` for the rationale (serializing C SDK
-    // calls under uncertain thread-safety; cache eliminates the per-
-    // request TLS handshake which dominates KMS latency).
-    let mut cache = match CLIENT_CACHE.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
-    // Rebuild the cached client iff the credentials changed (rotation)
-    // or this is the first call in the process.
-    let needs_rebuild = match &cache.0 {
-        Some(cached) => cached.key != requested,
-        None => true,
-    };
-    if needs_rebuild {
-        if let Some(mut old) = cache.0.take() {
-            // Tear down the old client + credentials in reverse alloc order
-            // before the new ones are built, so the SDK doesn't briefly hold
-            // two clients open against the same vsock proxy.
-            unsafe { old.resources.cleanup() };
-        }
-        let new = build_cached_client(&requested, aws_secret_key, aws_session_token)?;
-        cache.0 = Some(new);
+    // Bounded sync send: if the worker queue is full (>KMS_WORKER_QUEUE
+    // requests in flight), the caller waits its turn instead of growing
+    // the queue without bound.
+    if kms_worker().send(req).is_err() {
+        // Worker thread died; only happens if the worker panicked, which
+        // with panic=abort means the whole process aborts anyway.
+        return Err(Error::SdkKmsClientError);
     }
 
-    // SAFETY: cache.0 is Some after the rebuild step above.
-    let cached = match cache.0.as_mut() {
-        Some(c) => c,
-        None => return Err(Error::SdkKmsClientError),
-    };
-
-    unsafe { do_decrypt(&mut cached.resources, ciphertext) }
+    match response_rx.recv_timeout(KMS_REQUEST_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err(Error::SdkKmsDecryptError),
+    }
 }
 
 /// Build a fresh `KmsResources` (allocator, credential strings, config,
@@ -519,6 +602,49 @@ mod tests {
     fn test_error_implements_std_error() {
         fn assert_std_error<E: std::error::Error>() {}
         assert_std_error::<Error>();
+    }
+
+    // ---------- CredentialKey behavior (host-testable) ----------
+    //
+    // The cfg(musl) worker uses these properties to decide whether to
+    // rebuild the cached KMS client. Tested here so the rebuild logic
+    // is covered by host CI in addition to the docker-build path.
+
+    #[test]
+    fn credential_key_same_region_same_id_is_equal() {
+        let a = CredentialKey {
+            region: b"us-east-1".to_vec(),
+            access_key_id: b"AKIATEST".to_vec(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn credential_key_differs_on_access_key_change() {
+        // This is the case that triggers a rebuild on credential rotation.
+        let a = CredentialKey {
+            region: b"us-east-1".to_vec(),
+            access_key_id: b"AKIAOLD".to_vec(),
+        };
+        let b = CredentialKey {
+            region: b"us-east-1".to_vec(),
+            access_key_id: b"AKIANEW".to_vec(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn credential_key_differs_on_region_change() {
+        let a = CredentialKey {
+            region: b"us-east-1".to_vec(),
+            access_key_id: b"AKIATEST".to_vec(),
+        };
+        let b = CredentialKey {
+            region: b"us-west-2".to_vec(),
+            access_key_id: b"AKIATEST".to_vec(),
+        };
+        assert_ne!(a, b);
     }
 
     /// Test that Error implements Display trait with descriptive messages

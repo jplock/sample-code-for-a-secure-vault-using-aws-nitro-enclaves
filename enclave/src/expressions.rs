@@ -17,6 +17,21 @@ use crate::functions;
 /// reused across many requests). Once full, further unique expressions
 /// compile but bypass the cache, so adversarial inputs cannot make
 /// memory grow without bound.
+///
+/// Worst-case footprint:
+///   `MAX_CACHED_PROGRAMS` × (`MAX_EXPRESSION_LENGTH` raw key + compiled
+///   AST overhead) ≈ tens of MB. Acceptable in the enclave's memory
+///   envelope (default 512 MiB).
+///
+/// # Side-channel note
+///
+/// The cache is process-wide and keyed verbatim by expression text. Two
+/// requests submitting the same expression observe slightly different
+/// timings: a cache hit avoids the parse and skips straight to
+/// `Program::execute`. Under the current single-vault-per-enclave model
+/// this is not a meaningful leak, but if multiple vaults ever share an
+/// enclave, key the cache by `(vault_id, expression)` to keep the
+/// timing observation per-tenant.
 const MAX_CACHED_PROGRAMS: usize = 1024;
 
 static PROGRAM_CACHE: OnceLock<RwLock<HashMap<String, Arc<Program>>>> = OnceLock::new();
@@ -28,7 +43,11 @@ fn program_cache() -> &'static RwLock<HashMap<String, Arc<Program>>> {
 /// Compile `expression` or return the cached compiled program.
 ///
 /// Lock poisoning (a thread panicking while holding the cache lock) is
-/// recovered — the cache content is just data, no invariants are at risk.
+/// recovered — the cache content is just data, no invariants are at
+/// risk. In release builds this path is unreachable because the
+/// workspace's `panic = "abort"` profile turns any panic into an
+/// immediate process kill; the recovery is present so debug-mode
+/// regressions don't deadlock.
 fn get_or_compile(expression: &str) -> Result<Arc<Program>, ParseErrors> {
     let cache = program_cache();
 
@@ -43,7 +62,13 @@ fn get_or_compile(expression: &str) -> Result<Arc<Program>, ParseErrors> {
         }
     }
 
-    // Slow path: compile, then take the exclusive lock to insert.
+    // Slow path: compile *outside* the write lock to keep the critical
+    // section short. If two threads race to compile the same
+    // expression, both succeed; whichever takes the write lock first
+    // inserts, and the second `or_insert_with` is a no-op (the second
+    // thread's `Arc<Program>` returned to its caller is then dropped
+    // when no longer used). Identical compilation is idempotent, so
+    // discarding one compiled copy is harmless.
     let program = Arc::new(Program::compile(expression)?);
 
     let mut guard = match cache.write() {
@@ -492,6 +517,20 @@ mod tests {
         // Parse error must surface; we do NOT cache failed compilations.
         let result = get_or_compile("this is ((( definitely not a valid CEL");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_or_compile_still_works_when_cache_is_full() {
+        // Fill the cache past MAX_CACHED_PROGRAMS using a unique prefix so
+        // we don't trample the test_get_or_compile_returns_same_arc_on_hit
+        // fixture above. Once the cache is full, further unique
+        // expressions must still compile correctly — they just bypass
+        // the cache rather than evicting an existing entry.
+        for i in 0..MAX_CACHED_PROGRAMS + 16 {
+            let expr = format!("cache_fill_{i}.to_uppercase()");
+            // Each call must succeed regardless of cache state.
+            get_or_compile(&expr).unwrap();
+        }
     }
 
     #[test]
