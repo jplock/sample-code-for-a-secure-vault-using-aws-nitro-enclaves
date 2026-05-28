@@ -107,11 +107,4 @@ class HpkeAdapter(BaseAdapter):
                 )
                 encrypted_values[constants.ATTR_SSN4] = data.encapped_key + data.ciphertext
 
-        # Note: we used to `del plaintext_values` here, but that only
-        # drops the local name binding — Python strings and ints are
-        # immutable, so the underlying bytes can't be wiped in place
-        # and the caller's reference (if any) is unaffected. Real
-        # plaintext zeroization would require the API to hand us
-        # `bytearray` inputs we can overwrite. Treat plaintext residue
-        # as a known limitation of the current input type.
         return encrypted_values
