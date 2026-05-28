@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: MIT-0
 
 use aws_lc_rs::digest;
-use cel_interpreter::{FunctionContext, ResolveResult, extractors::This};
+use cel::{FunctionContext, ResolveResult, extractors::This};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
 use data_encoding::{BASE64, HEXLOWER, HEXLOWER_PERMISSIVE};
 use std::sync::Arc;
 
 // Default functions available:
-// https://github.com/clarkmcc/cel-rust/blob/master/interpreter/src/context.rs#L169
+// https://github.com/cel-rust/cel-rust/blob/v0.13.0/cel/src/context.rs
 
 // String Functions
 
