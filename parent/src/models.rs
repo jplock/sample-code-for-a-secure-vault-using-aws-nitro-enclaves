@@ -15,10 +15,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
+use vault_protocol::EncryptedField;
 
 use crate::constants::{
-    MAX_ENCODING_LENGTH, MAX_ENCRYPTED_KEY_LENGTH, MAX_EXPRESSIONS_COUNT, MAX_FIELDS_COUNT,
-    MAX_REGION_LENGTH, MAX_SUITE_ID_LENGTH, MAX_VAULT_ID_LENGTH,
+    MAX_ENCRYPTED_KEY_LENGTH, MAX_EXPRESSIONS_COUNT, MAX_FIELDS_COUNT, MAX_REGION_LENGTH,
+    MAX_SUITE_ID_LENGTH, MAX_VAULT_ID_LENGTH,
 };
 
 /// The information to be provided for a `describe-enclaves` request.
@@ -122,47 +123,52 @@ pub struct EnclaveBuildInfo {
 // boundary, `crate::routes::decrypt` builds a `vault_protocol::Credential` (which
 // IS non-Clone + ZeroizeOnDrop) from the SDK type before forwarding.
 
-/// Decrypt request received from the API tier.
+/// Decrypt request received from the API tier (CBOR wire only).
 ///
-/// This struct contains all information needed to decrypt vault data:
+/// Carries everything the parent needs to forward a decrypt to an
+/// enclave:
 /// - Vault identification and region
-/// - Encrypted data fields
-/// - HPKE cryptographic parameters
+/// - Encrypted fields as typed `(encapped_key, ciphertext)` byte pairs
+/// - HPKE suite identifier as raw 10 bytes (RFC 9180)
+/// - KMS-encrypted HPKE private key as raw bytes
 /// - Optional CEL transformation expressions
 ///
-/// All fields are validated according to size limits defined in [`crate::constants`].
+/// All fields are validated against the size limits in
+/// [`crate::constants`]. The per-field shape matches
+/// [`vault_protocol::EncryptedField`] exactly, so translation to the
+/// enclave wire format is essentially a move (plus credential
+/// injection and 10-byte suite-id → `Suite` enum mapping).
+///
+/// `serde_bytes` is used on the byte fields so CBOR encodes them as
+/// `bstr` (RFC 8949 major type 2), matching what Python's `cbor2`
+/// produces on the other end of the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ParentRequest {
-    /// Unique identifier for the vault (1-256 characters).
     #[validate(length(min = 1, max = "MAX_VAULT_ID_LENGTH"))]
     pub vault_id: String,
 
-    /// AWS region where the KMS key resides (e.g., "us-east-1").
     #[validate(length(min = 1, max = "MAX_REGION_LENGTH"))]
     #[validate(custom(function = "validate_aws_region"))]
     pub region: String,
 
-    /// Map of field names to encrypted values (max 100 fields).
+    /// Map of field names to typed encrypted values (max 100 fields).
     #[validate(custom(function = "validate_fields_count"))]
-    pub fields: BTreeMap<String, String>,
+    pub fields: BTreeMap<String, EncryptedField>,
 
-    /// HPKE suite identifier, base64 encoded.
+    /// HPKE suite identifier, raw 10 bytes.
+    #[serde(with = "serde_bytes")]
     #[validate(length(min = 1, max = "MAX_SUITE_ID_LENGTH"))]
-    pub suite_id: String,
+    pub suite_id: Vec<u8>,
 
-    /// HPKE encrypted private key, base64 encoded.
+    /// KMS-encrypted HPKE private key, raw bytes.
+    #[serde(with = "serde_bytes")]
     #[validate(length(min = 1, max = "MAX_ENCRYPTED_KEY_LENGTH"))]
-    pub encrypted_private_key: String,
+    pub encrypted_private_key: Vec<u8>,
 
     /// Optional CEL expressions for transforming decrypted values (max 100).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_expressions_count"))]
     pub expressions: Option<BTreeMap<String, String>>,
-
-    /// Optional encoding for the decrypted values (e.g., "utf-8").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[validate(length(max = "MAX_ENCODING_LENGTH"))]
-    pub encoding: Option<String>,
 }
 
 /// Validates AWS region format.
@@ -214,7 +220,7 @@ fn validate_aws_region(region: &str) -> Result<(), validator::ValidationError> {
 
 /// Validates that the fields map doesn't exceed [`MAX_FIELDS_COUNT`].
 fn validate_fields_count(
-    fields: &BTreeMap<String, String>,
+    fields: &BTreeMap<String, EncryptedField>,
 ) -> Result<(), validator::ValidationError> {
     if fields.len() > MAX_FIELDS_COUNT {
         return Err(validator::ValidationError::new("too_many_fields"));
@@ -254,19 +260,24 @@ pub struct ParentResponse {
 mod tests {
     use super::*;
 
-    // Helper to create a valid ParentRequest for testing
+    // Helper to create a valid ParentRequest for testing.
     fn valid_parent_request() -> ParentRequest {
         let mut fields = BTreeMap::new();
-        fields.insert("ssn".to_string(), "encrypted_value".to_string());
+        fields.insert(
+            "ssn".to_string(),
+            EncryptedField {
+                encapped_key: vec![0u8; 8],
+                ciphertext: vec![0u8; 8],
+            },
+        );
 
         ParentRequest {
             vault_id: "v_test_123".to_string(),
             region: "us-east-1".to_string(),
             fields,
-            suite_id: "base64_suite_id".to_string(),
-            encrypted_private_key: "base64_key".to_string(),
+            suite_id: vec![0u8; 10],
+            encrypted_private_key: vec![0u8; 32],
             expressions: None,
-            encoding: None,
         }
     }
 
@@ -349,6 +360,13 @@ mod tests {
 
     // ==================== Fields Count Validation Tests ====================
 
+    fn dummy_field() -> EncryptedField {
+        EncryptedField {
+            encapped_key: vec![0u8; 4],
+            ciphertext: vec![0u8; 4],
+        }
+    }
+
     #[test]
     fn test_validate_fields_count_empty() {
         let fields = BTreeMap::new();
@@ -359,7 +377,7 @@ mod tests {
     fn test_validate_fields_count_at_max() {
         let mut fields = BTreeMap::new();
         for i in 0..MAX_FIELDS_COUNT {
-            fields.insert(format!("field_{}", i), "value".to_string());
+            fields.insert(format!("field_{}", i), dummy_field());
         }
         assert!(validate_fields_count(&fields).is_ok());
     }
@@ -368,7 +386,7 @@ mod tests {
     fn test_validate_fields_count_exceeds_max() {
         let mut fields = BTreeMap::new();
         for i in 0..=MAX_FIELDS_COUNT {
-            fields.insert(format!("field_{}", i), "value".to_string());
+            fields.insert(format!("field_{}", i), dummy_field());
         }
         assert!(validate_fields_count(&fields).is_err());
     }
@@ -431,14 +449,14 @@ mod tests {
     #[test]
     fn test_parent_request_empty_suite_id() {
         let mut request = valid_parent_request();
-        request.suite_id = "".to_string();
+        request.suite_id = Vec::new();
         assert!(request.validate().is_err());
     }
 
     #[test]
     fn test_parent_request_empty_encrypted_key() {
         let mut request = valid_parent_request();
-        request.encrypted_private_key = "".to_string();
+        request.encrypted_private_key = Vec::new();
         assert!(request.validate().is_err());
     }
 
@@ -449,20 +467,6 @@ mod tests {
         expressions.insert("ssn".to_string(), "mask(value, 4)".to_string());
         request.expressions = Some(expressions);
         assert!(request.validate().is_ok());
-    }
-
-    #[test]
-    fn test_parent_request_with_encoding() {
-        let mut request = valid_parent_request();
-        request.encoding = Some("utf-8".to_string());
-        assert!(request.validate().is_ok());
-    }
-
-    #[test]
-    fn test_parent_request_encoding_too_long() {
-        let mut request = valid_parent_request();
-        request.encoding = Some("x".repeat(MAX_ENCODING_LENGTH as usize + 1));
-        assert!(request.validate().is_err());
     }
 
     // ==================== Serialization Tests ====================
@@ -521,19 +525,5 @@ mod tests {
         let info: EnclaveRunInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.enclave_name, "enclave-vault-1");
         assert_eq!(info.cpu_count, 2);
-    }
-
-    #[test]
-    fn test_parent_request_deserialization() {
-        let json = r#"{
-            "vault_id": "v_123",
-            "region": "us-east-1",
-            "fields": {"ssn": "encrypted"},
-            "suite_id": "suite",
-            "encrypted_private_key": "key"
-        }"#;
-        let request: ParentRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(request.vault_id, "v_123");
-        assert_eq!(request.region, "us-east-1");
     }
 }

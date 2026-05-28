@@ -16,6 +16,7 @@ workspace = true
 anyhow = { workspace = true, features = ["std"] }
 ciborium = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
+serde_bytes = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 tracing = { workspace = true, features = ["attributes"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }

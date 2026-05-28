@@ -23,8 +23,12 @@ from enum import IntEnum
 
 
 class EncodingVersion(IntEnum):
-    # The integer values cross the vsock boundary as their str() form
-    # ("1", "2") inside the request payload. They MUST stay in lockstep
-    # with enclave/src/constants.rs::ENCODING_HEX / ENCODING_BINARY.
-    HEX = 1  # hex(encap) + '#' + hex(ciphertext)
-    BINARY = 2  # encap + ciphertext
+    # Written on every new vault record as `_v` (`ATTR_VERSION`). The
+    # value is no longer load-bearing on read — the API discriminates
+    # between legacy hex strings and binary attributes by the
+    # DynamoDB type — but it is preserved as a forward-looking marker
+    # in case a future on-disk format ever needs a discriminator.
+    # `HEX = 1` (legacy `encap_hex#ct_hex` strings) is intentionally
+    # absent: existing v=1 records still decode via
+    # `utils.decode_v1_field`, but no new code paths construct one.
+    BINARY = 2  # encap || ciphertext stored as a DynamoDB Binary attribute

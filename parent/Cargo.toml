@@ -26,10 +26,11 @@ aws-config = { workspace = true, features = ["rt-tokio", "behavior-version-lates
 aws-credential-types = { workspace = true }
 aws-smithy-runtime-api = { workspace = true, features = ["client"] }
 axum = { workspace = true, features = ["http1", "json", "tokio", "tracing"] }
+ciborium = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "env", "help"] }
-data-encoding = { workspace = true, features = ["alloc"] }
 fastrand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "process", "tracing", "time", "signal"] }
@@ -42,5 +43,6 @@ vsock = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+ciborium = { workspace = true }
 proptest = { workspace = true, features = ["std"] }
 tokio-test = { workspace = true }

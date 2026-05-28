@@ -57,14 +57,17 @@ pub const MAX_VAULT_ID_LENGTH: u64 = 256;
 /// Maximum length of the `region` field in [`crate::models::ParentRequest`].
 pub const MAX_REGION_LENGTH: u64 = 64;
 
-/// Maximum length of the `suite_id` field in [`crate::models::ParentRequest`].
-pub const MAX_SUITE_ID_LENGTH: u64 = 1024;
+/// Maximum length (in raw bytes) of the `suite_id` field in
+/// [`crate::models::ParentRequest`]. The HPKE suite identifier is
+/// always exactly 10 bytes per RFC 9180; the slack here surfaces
+/// obviously-bad inputs before deeper validation.
+pub const MAX_SUITE_ID_LENGTH: u64 = 16;
 
-/// Maximum length of the `encrypted_private_key` field in [`crate::models::ParentRequest`].
-pub const MAX_ENCRYPTED_KEY_LENGTH: u64 = 8192;
-
-/// Maximum length of the `encoding` field in [`crate::models::ParentRequest`].
-pub const MAX_ENCODING_LENGTH: u64 = 32;
+/// Maximum length (in raw bytes) of the `encrypted_private_key` field
+/// in [`crate::models::ParentRequest`]. KMS ciphertext for an HPKE
+/// private key is typically a few hundred bytes; the bound provides
+/// headroom for larger KMS encryption contexts.
+pub const MAX_ENCRYPTED_KEY_LENGTH: u64 = 6144;
 
 /// Maximum number of fields allowed in the `fields` map of [`crate::models::ParentRequest`].
 pub const MAX_FIELDS_COUNT: usize = 100;

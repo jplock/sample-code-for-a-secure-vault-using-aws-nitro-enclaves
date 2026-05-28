@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 import hpke
 
-from app import constants, models, encoders, resources
+from app import constants, models, resources
 
 __all__ = ["HpkeAdapter"]
 
@@ -48,7 +48,7 @@ class BaseAdapter(abc.ABC):
     @abc.abstractmethod
     def encrypt_values(
         self, public_key: bytes, plaintext_values: Dict[str, Any], vault_id: Optional[str] = None
-    ) -> Dict[str, str]:
+    ) -> Dict[str, bytes]:
         raise NotImplementedError
 
 
@@ -69,7 +69,7 @@ class HpkeAdapter(BaseAdapter):
 
     def encrypt_values(
         self, public_key: bytes, plaintext_values: Dict[str, Any], vault_id: Optional[str] = None
-    ) -> Dict[str, str | bytes]:
+    ) -> Dict[str, bytes]:
         if not public_key:
             return plaintext_values
         if not plaintext_values:
@@ -78,9 +78,8 @@ class HpkeAdapter(BaseAdapter):
         pk: ec.EllipticCurvePublicKey = serialization.load_der_public_key(public_key)
 
         info = vault_id.encode()
-        encoder = encoders.BinaryEncoder()
 
-        encrypted_values: Dict[str, str | bytes] = {}
+        encrypted_values: Dict[str, bytes] = {}
 
         for field, value in plaintext_values.items():
             data = self._encrypt_value(
@@ -89,7 +88,11 @@ class HpkeAdapter(BaseAdapter):
                 info=info,
                 plaintext=str(value).encode(),
             )
-            encrypted_values[field] = encoder.encode(data)
+            # Wire shape matches `vault_protocol::EncryptedField`'s
+            # `encap_key || ciphertext` concat; the API decoder splits
+            # on the HPKE suite's encapsulated-key length before
+            # sending to the parent over CBOR.
+            encrypted_values[field] = data.encapped_key + data.ciphertext
 
             # encrypt last 4 digits of SSN separately from full SSN
             if field == constants.ATTR_SSN9:
@@ -102,8 +105,6 @@ class HpkeAdapter(BaseAdapter):
                     info=info,
                     plaintext=last_four_ssn.encode(),
                 )
-                encrypted_values[constants.ATTR_SSN4] = encoder.encode(data)
-
-        del plaintext_values
+                encrypted_values[constants.ATTR_SSN4] = data.encapped_key + data.ciphertext
 
         return encrypted_values

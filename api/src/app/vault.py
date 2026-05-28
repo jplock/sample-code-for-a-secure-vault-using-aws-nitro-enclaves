@@ -24,11 +24,16 @@ from typing import Optional, Dict, Any, List
 
 from aws_lambda_powertools import Logger, Tracer
 from boto3.dynamodb.types import Binary
+import cbor2
 import requests
 from requests.exceptions import HTTPError
 
 from app import constants, utils, exceptions, encryptors
 from app.resources import TransactionWriter
+
+# MIME type for CBOR payloads (RFC 8949). Parent's `/decrypt` handler
+# is CBOR-only; the API is the only client.
+_CBOR_CONTENT_TYPE = "application/cbor"
 
 __all__ = [
     "create_vault",
@@ -241,38 +246,79 @@ def decrypt_vault(
         logger.error("Encryption suite not found in vault", key=key)
         raise exceptions.InternalServerError("Encryption suite not found in vault")
 
+    # `_v` is informational here — the actual v=1/v=2 discriminator is
+    # the DynamoDB type of each per-field value (String for legacy hex,
+    # Binary for current). We still log it for forensic correlation.
     encoding_version: Optional[int] = item.get(constants.ATTR_VERSION)
 
-    payload_fields = {}
+    # Normalize every per-field value to a typed `{encapped_key,
+    # ciphertext}` pair of raw bytes regardless of how it was stored in
+    # DynamoDB. v=1 records (legacy hex) carry `encap_hex#ct_hex`
+    # strings; v=2 records (current binary default) carry `encap ||
+    # ciphertext` concatenated bytes, split using the suite's
+    # encapsulated-key length. The parent receives the same typed
+    # shape either way.
+    suite_id_bytes = bytes(hpke_suite_id)
+    encap_size = utils.hpke_encap_key_size(suite_id_bytes)
+
+    payload_fields: Dict[str, Dict[str, bytes]] = {}
     for field in fields:
         value: Optional[str | Binary] = item.get(field)
+        if value is None:
+            continue
         if isinstance(value, Binary):
-            payload_fields[field] = utils.b64_encode(value)
+            encap, ciphertext = utils.decode_v2_field(value, encap_size)
         else:
-            payload_fields[field] = value
+            encap, ciphertext = utils.decode_v1_field(value)
+        payload_fields[field] = {"encapped_key": encap, "ciphertext": ciphertext}
 
-    payload = {
+    payload: Dict[str, Any] = {
         "vault_id": vault_id,
         "region": AWS_REGION,
         "fields": payload_fields,
-        "suite_id": utils.b64_encode(hpke_suite_id),
-        "encrypted_private_key": utils.b64_encode(encrypted_secret_key),
+        "suite_id": suite_id_bytes,
+        "encrypted_private_key": bytes(encrypted_secret_key),
     }
-    if encoding_version:
-        payload["encoding"] = str(encoding_version)
     if expressions:
         payload["expressions"] = expressions
 
     url = f"{VAULT_URL}/decrypt"
 
-    logger.debug("Sending decrypt request to vault", payload=payload, url=url)
-    r = requests.post(url, json=payload, timeout=constants.VAULT_TIMEOUT_SECS, allow_redirects=False)
+    logger.debug(
+        "Sending decrypt request to vault",
+        url=url,
+        vault_id=vault_id,
+        field_count=len(payload_fields),
+        encoding_version=encoding_version,
+    )
+    body = cbor2.dumps(payload)
+    r = requests.post(
+        url,
+        data=body,
+        headers={
+            "Content-Type": _CBOR_CONTENT_TYPE,
+            "Accept": _CBOR_CONTENT_TYPE,
+        },
+        timeout=constants.VAULT_TIMEOUT_SECS,
+        allow_redirects=False,
+    )
     try:
         r.raise_for_status()
     except HTTPError:
-        logger.exception("Invalid response received from vault", status_code=r.status_code, body=r.text)
+        logger.exception(
+            "Invalid response received from vault",
+            status_code=r.status_code,
+            body=r.text,
+        )
         raise exceptions.InternalServerError()
 
-    data = r.json()
+    # Parent normally responds CBOR (matching Accept), but error
+    # responses come back as JSON regardless. We branch on the response
+    # Content-Type rather than guessing per status code.
+    response_ct = r.headers.get("content-type", "").lower()
+    if response_ct.startswith(_CBOR_CONTENT_TYPE):
+        data = cbor2.loads(r.content)
+    else:
+        data = r.json()
 
     return data

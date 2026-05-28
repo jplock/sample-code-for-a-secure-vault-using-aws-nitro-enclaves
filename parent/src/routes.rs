@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use crate::application::AppState;
+use crate::cbor::Cbor;
 use crate::constants;
 use crate::errors::AppError;
 use crate::models::{EnclaveDescribeInfo, EnclaveRunInfo, ParentRequest, ParentResponse};
@@ -83,29 +84,33 @@ pub async fn run_enclave(
 
 /// Decrypts vault fields using a Nitro Enclave.
 ///
-/// This is the main endpoint for decrypting PII/PHI data stored in the vault.
-/// The request is validated, then forwarded to an available enclave over vsock.
+/// Main endpoint for decrypting PII/PHI data stored in the vault. The
+/// request/response wire format is CBOR (`application/cbor`); the API
+/// Lambda is the only client and always sends CBOR. JSON support was
+/// removed once the API → parent leg fully migrated.
 ///
-/// # Request Flow
+/// # Request flow
 ///
-/// 1. Validate the incoming [`ParentRequest`]
-/// 2. Check for available enclaves
-/// 3. Fetch IAM credentials from the cache (or IMDS if expired)
-/// 4. Select a random available enclave for load balancing
-/// 5. Send the request to the enclave over vsock
-/// 6. Return the decrypted response
+/// 1. Validate the deserialized [`ParentRequest`].
+/// 2. Check for available enclaves (fail fast on none).
+/// 3. Fetch IAM credentials from the IMDS cache.
+/// 4. Build the binary `EnclaveRequest` via
+///    [`build_enclave_request`].
+/// 5. Pick a random enclave for load balancing.
+/// 6. Send over vsock (blocking call wrapped in `spawn_blocking`).
+/// 7. Return the response as CBOR.
 ///
 /// # Errors
 ///
-/// - [`AppError::ValidationError`] - Request validation failed
-/// - [`AppError::EnclaveNotFound`] - No enclaves available
-/// - [`AppError::InternalServerError`] - Credential or enclave communication failure
+/// - [`AppError::ValidationError`] — request validation or translation failure
+/// - [`AppError::EnclaveNotFound`] — no enclaves available
+/// - [`AppError::InternalServerError`] — credential or enclave communication failure
 #[tracing::instrument(skip(state, request))]
 pub async fn decrypt(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<ParentRequest>,
-) -> Result<Json<ParentResponse>, AppError> {
-    // 1. Validate incoming request against size limits and format rules
+    Cbor(request): Cbor<ParentRequest>,
+) -> Result<Cbor<ParentResponse>, AppError> {
+    // 1. Validate incoming request against size limits and format rules.
     tracing::debug!(
         "[parent] validating decrypt request for vault_id: {}",
         request.vault_id
@@ -115,31 +120,28 @@ pub async fn decrypt(
         AppError::ValidationError(e.to_string())
     })?;
 
-    // 2. Get available enclaves early to fail fast if none are available
+    // 2. Get available enclaves early to fail fast if none are available.
     let enclaves: Vec<EnclaveDescribeInfo> = state.enclaves.get_enclaves().await;
     if enclaves.is_empty() {
         return Err(AppError::EnclaveNotFound);
     }
 
-    // 3. Fetch (or use cached) IAM credentials from IMDS
+    // 3. Fetch (or use cached) IAM credentials from IMDS.
     tracing::debug!("[parent] fetching credentials from cache");
     let credential = state.credentials.get_credentials().await.map_err(|e| {
         tracing::error!("[parent] failed to get credentials: {:?}", e);
         e
     })?;
-    tracing::debug!("[parent] credentials retrieved successfully");
 
     // Translate the SDK `Credentials` into the wire crate's typed,
     // zeroize-on-drop `Credential` (orphan rules prevent an `impl From`
-    // here), then build the binary EnclaveRequest. Decoding all
-    // base64/hex envelopes at this boundary means the enclave never
-    // sees encoded strings.
+    // here), then build the binary EnclaveRequest.
     let wire_credential = WireCredential::new(
         credential.access_key_id().to_string(),
         credential.secret_access_key().to_string(),
         credential.session_token().unwrap_or_default().to_string(),
     );
-    let request = build_enclave_request(request, wire_credential).map_err(|e| {
+    let enclave_req = build_enclave_request(request, wire_credential).map_err(|e| {
         tracing::error!(
             "[parent] failed to translate request to wire format: {:?}",
             e
@@ -147,7 +149,7 @@ pub async fn decrypt(
         AppError::ValidationError(e.to_string())
     })?;
 
-    // 4. Select a random enclave for load balancing
+    // 4. Select a random enclave for load balancing.
     let index = fastrand::usize(..enclaves.len());
     let enclave = enclaves.get(index).ok_or(AppError::EnclaveNotFound)?;
     let cid: u32 = enclave
@@ -157,12 +159,12 @@ pub async fn decrypt(
 
     tracing::debug!("[parent] sending decrypt request to CID: {:?}", cid);
 
-    // 5. Send request to enclave via vsock (blocking operation)
-    // spawn_blocking is used because vsock I/O is synchronous
+    // 5. Send request to enclave via vsock (blocking operation).
+    // spawn_blocking is used because vsock I/O is synchronous.
     let enclaves_ref = state.enclaves.clone();
     let port = constants::ENCLAVE_PORT;
     let response: EnclaveResponse =
-        tokio::task::spawn_blocking(move || enclaves_ref.decrypt(cid, port, request))
+        tokio::task::spawn_blocking(move || enclaves_ref.decrypt(cid, port, enclave_req))
             .await
             .map_err(|e| {
                 tracing::error!("[parent] spawn_blocking task failed: {:?}", e);
@@ -176,14 +178,14 @@ pub async fn decrypt(
     tracing::debug!("[parent] received response from CID: {:?}", cid);
 
     // 6. Transform enclave response to parent response format. The
-    // enclave returns a HashMap (no ordering guarantee); the API returns
-    // a BTreeMap so the JSON output is deterministic for clients.
-    let response = ParentResponse {
+    // enclave returns a HashMap (no ordering guarantee); the API
+    // returns a BTreeMap so output is deterministic for clients.
+    let parent_response = ParentResponse {
         fields: response.fields.unwrap_or_default().into_iter().collect(),
         errors: response.errors,
     };
 
-    Ok(Json(response))
+    Ok(Cbor(parent_response))
 }
 
 #[cfg(test)]

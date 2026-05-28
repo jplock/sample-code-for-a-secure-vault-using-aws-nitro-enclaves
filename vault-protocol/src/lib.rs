@@ -131,9 +131,17 @@ impl Suite {
 /// hex/base64 transport encoding is the parent's responsibility on the
 /// API ↔ parent boundary and is unwound before the value reaches this
 /// crate.
+///
+/// `serde_bytes` is used so the CBOR wire encoding is a compact byte
+/// string (`bstr`, major type 2) rather than the default array of
+/// small ints. This matches what Python's `cbor2` (and any other
+/// language's idiomatic CBOR library) produces on the API ↔ parent
+/// leg, and saves space on the parent ↔ enclave leg too.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedField {
+    #[serde(with = "serde_bytes")]
     pub encapped_key: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
 }
 
@@ -197,7 +205,9 @@ pub struct ParentRequest {
     pub fields: HashMap<String, EncryptedField>,
     pub suite: Suite,
     /// KMS-encrypted HPKE private key blob. Decrypted via the vsock KMS
-    /// proxy inside the enclave.
+    /// proxy inside the enclave. `serde_bytes` for the same reason as
+    /// [`EncryptedField`] — keep the CBOR wire as a compact `bstr`.
+    #[serde(with = "serde_bytes")]
     pub encrypted_private_key: Vec<u8>,
     pub expressions: Option<HashMap<String, String>>,
 }
