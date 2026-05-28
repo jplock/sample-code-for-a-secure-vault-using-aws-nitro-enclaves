@@ -58,6 +58,7 @@
 //! - 30-second request timeout prevents resource exhaustion
 
 pub mod application;
+pub mod cbor;
 pub mod configuration;
 pub mod constants;
 pub mod enclaves;

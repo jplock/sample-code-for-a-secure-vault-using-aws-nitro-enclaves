@@ -57,14 +57,30 @@ pub const MAX_VAULT_ID_LENGTH: u64 = 256;
 /// Maximum length of the `region` field in [`crate::models::ParentRequest`].
 pub const MAX_REGION_LENGTH: u64 = 64;
 
-/// Maximum length of the `suite_id` field in [`crate::models::ParentRequest`].
+/// Maximum length of the base64-encoded `suite_id` field in
+/// [`crate::models::ParentRequest`] (JSON wire shape).
 pub const MAX_SUITE_ID_LENGTH: u64 = 1024;
 
-/// Maximum length of the `encrypted_private_key` field in [`crate::models::ParentRequest`].
+/// Maximum length of the base64-encoded `encrypted_private_key` field
+/// in [`crate::models::ParentRequest`] (JSON wire shape).
 pub const MAX_ENCRYPTED_KEY_LENGTH: u64 = 8192;
 
-/// Maximum length of the `encoding` field in [`crate::models::ParentRequest`].
+/// Maximum length of the `encoding` field in
+/// [`crate::models::ParentRequest`] (JSON wire shape).
 pub const MAX_ENCODING_LENGTH: u64 = 32;
+
+/// Maximum length of the raw-byte `suite_id` field in
+/// [`crate::models::ParentRequestCbor`] (CBOR wire shape). The HPKE
+/// suite identifier is always exactly 10 bytes; the slack here is just
+/// padding to surface obviously-bad inputs before deeper validation.
+pub const MAX_SUITE_ID_BYTES: u64 = 16;
+
+/// Maximum length of the raw-byte `encrypted_private_key` field in
+/// [`crate::models::ParentRequestCbor`] (CBOR wire shape). KMS
+/// ciphertext for an HPKE private key is typically a few hundred bytes;
+/// the bound matches the JSON-path base64 limit decoded
+/// (~`MAX_ENCRYPTED_KEY_LENGTH * 3 / 4`).
+pub const MAX_ENCRYPTED_KEY_BYTES: u64 = 6144;
 
 /// Maximum number of fields allowed in the `fields` map of [`crate::models::ParentRequest`].
 pub const MAX_FIELDS_COUNT: usize = 100;

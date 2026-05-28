@@ -15,10 +15,12 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
+use vault_protocol::EncryptedField;
 
 use crate::constants::{
-    MAX_ENCODING_LENGTH, MAX_ENCRYPTED_KEY_LENGTH, MAX_EXPRESSIONS_COUNT, MAX_FIELDS_COUNT,
-    MAX_REGION_LENGTH, MAX_SUITE_ID_LENGTH, MAX_VAULT_ID_LENGTH,
+    MAX_ENCODING_LENGTH, MAX_ENCRYPTED_KEY_BYTES, MAX_ENCRYPTED_KEY_LENGTH, MAX_EXPRESSIONS_COUNT,
+    MAX_FIELDS_COUNT, MAX_REGION_LENGTH, MAX_SUITE_ID_BYTES, MAX_SUITE_ID_LENGTH,
+    MAX_VAULT_ID_LENGTH,
 };
 
 /// The information to be provided for a `describe-enclaves` request.
@@ -165,6 +167,48 @@ pub struct ParentRequest {
     pub encoding: Option<String>,
 }
 
+/// CBOR-shaped decrypt request received from the API tier.
+///
+/// Same semantics as [`ParentRequest`], but everything that was
+/// base64/hex-encoded for the JSON wire travels as raw bytes here. The
+/// per-field shape matches [`vault_protocol::EncryptedField`] exactly,
+/// so translation to the enclave wire format is essentially a move.
+///
+/// There is no `encoding` selector — CBOR always carries raw bytes,
+/// and the API decodes any legacy `_v = 1` (hex) DynamoDB records into
+/// the same `(encapped_key, ciphertext)` byte tuple before sending.
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct ParentRequestCbor {
+    #[validate(length(min = 1, max = "MAX_VAULT_ID_LENGTH"))]
+    pub vault_id: String,
+
+    #[validate(length(min = 1, max = "MAX_REGION_LENGTH"))]
+    #[validate(custom(function = "validate_aws_region"))]
+    pub region: String,
+
+    /// Map of field names to typed encrypted values (max 100 fields).
+    #[validate(custom(function = "validate_typed_fields_count"))]
+    pub fields: BTreeMap<String, EncryptedField>,
+
+    /// HPKE suite identifier, raw 10 bytes. `serde_bytes` ensures CBOR
+    /// decodes the wire `bstr` (what Python's `cbor2.dumps(bytes(...))`
+    /// emits) rather than expecting an array of small ints.
+    #[serde(with = "serde_bytes")]
+    #[validate(length(min = 1, max = "MAX_SUITE_ID_BYTES"))]
+    pub suite_id: Vec<u8>,
+
+    /// KMS-encrypted HPKE private key, raw bytes. Same `serde_bytes`
+    /// rationale as `suite_id`.
+    #[serde(with = "serde_bytes")]
+    #[validate(length(min = 1, max = "MAX_ENCRYPTED_KEY_BYTES"))]
+    pub encrypted_private_key: Vec<u8>,
+
+    /// Optional CEL expressions for transforming decrypted values (max 100).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_expressions_count"))]
+    pub expressions: Option<BTreeMap<String, String>>,
+}
+
 /// Validates AWS region format.
 ///
 /// Valid format: `{continent}-{direction}-{number}` where:
@@ -215,6 +259,16 @@ fn validate_aws_region(region: &str) -> Result<(), validator::ValidationError> {
 /// Validates that the fields map doesn't exceed [`MAX_FIELDS_COUNT`].
 fn validate_fields_count(
     fields: &BTreeMap<String, String>,
+) -> Result<(), validator::ValidationError> {
+    if fields.len() > MAX_FIELDS_COUNT {
+        return Err(validator::ValidationError::new("too_many_fields"));
+    }
+    Ok(())
+}
+
+/// Validates that the typed fields map doesn't exceed [`MAX_FIELDS_COUNT`].
+fn validate_typed_fields_count(
+    fields: &BTreeMap<String, EncryptedField>,
 ) -> Result<(), validator::ValidationError> {
     if fields.len() > MAX_FIELDS_COUNT {
         return Err(validator::ValidationError::new("too_many_fields"));

@@ -40,7 +40,20 @@ __all__ = [
     "now_micros",
     "build_key",
     "b64_encode",
+    "hpke_encap_key_size",
+    "decode_v1_field",
+    "decode_v2_field",
 ]
+
+# Per-KEM encapsulated-key sizes (RFC 9180 §7.1, "Nenc"). The 10-byte
+# HPKE suite identifier has the layout `"HPKE" + uint16 KEM_ID + uint16
+# KDF_ID + uint16 AEAD_ID` (big-endian), so bytes 4-5 carry the KEM ID
+# we look up here.
+_KEM_ENCAP_SIZES = {
+    0x0010: 65,   # DHKEM(P-256, HKDF-SHA256)
+    0x0011: 97,   # DHKEM(P-384, HKDF-SHA384)
+    0x0012: 133,  # DHKEM(P-521, HKDF-SHA512)
+}
 
 
 class CustomEncoder(Encoder):
@@ -107,3 +120,38 @@ def build_key(*args: str) -> str:
 
 def b64_encode(value: Union[bytes, Binary]) -> str:
     return base64.standard_b64encode(bytes(value)).decode()
+
+
+def hpke_encap_key_size(suite_id: bytes) -> int:
+    """Return the encapsulated-key length for the HPKE suite encoded in
+    `suite_id` (10 raw bytes per RFC 9180). Raises ValueError for an
+    unknown KEM ID — silently misreading the wire would corrupt the
+    encap/ciphertext split for that record."""
+    if len(suite_id) != 10:
+        raise ValueError(f"suite_id must be 10 bytes, got {len(suite_id)}")
+    kem_id = int.from_bytes(suite_id[4:6], "big")
+    size = _KEM_ENCAP_SIZES.get(kem_id)
+    if size is None:
+        raise ValueError(f"unsupported HPKE KEM ID: 0x{kem_id:04x}")
+    return size
+
+
+def decode_v1_field(value: str) -> tuple[bytes, bytes]:
+    """Split a legacy `_v == 1` (hex) per-field value `encap_hex#ct_hex`
+    into raw `(encapped_key, ciphertext)` bytes."""
+    encap_hex, sep, ct_hex = value.partition("#")
+    if not sep:
+        raise ValueError("v1 field is missing the '#' separator")
+    return bytes.fromhex(encap_hex), bytes.fromhex(ct_hex)
+
+
+def decode_v2_field(value: Union[bytes, Binary], encap_size: int) -> tuple[bytes, bytes]:
+    """Split a `_v == 2` (binary) per-field value `encap || ciphertext`
+    into raw `(encapped_key, ciphertext)` bytes, using `encap_size`
+    derived from the record's HPKE suite via `hpke_encap_key_size`."""
+    data = bytes(value)
+    if len(data) < encap_size:
+        raise ValueError(
+            f"v2 field too short: {len(data)} bytes, need at least {encap_size}"
+        )
+    return data[:encap_size], data[encap_size:]
