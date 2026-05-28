@@ -9,7 +9,7 @@ This component runs on the EC2 instance and provides:
 - **HTTP API** for decrypt requests from the API tier
 - **IAM credential management** via IMDS with automatic caching
 - **Nitro Enclave lifecycle management** (discovery and launch)
-- **vsock communication** with enclaves using length-prefixed JSON
+- **vsock communication** with enclaves using a versioned, length-framed CBOR protocol (`vault-protocol`)
 
 ## Architecture
 

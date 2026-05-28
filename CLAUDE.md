@@ -75,7 +75,7 @@ Client → API Gateway → Lambda (Python)
 
 **Communication boundaries:**
 - API ↔ Parent: HTTPS via Network Load Balancer
-- Parent ↔ Enclave: vsock with an 8-byte little-endian length prefix + JSON payload (`parent/src/protocol.rs` ↔ `enclave/src/protocol.rs`). Max message size 10 MB.
+- Parent ↔ Enclave: vsock with a 6-byte header (1B version, 1B message type, 4B little-endian length) + CBOR body (`vault-protocol/src/lib.rs`). Max message size 10 MB.
 - Enclave → KMS: vsock proxy forwarding to HTTPS (the enclave has no direct network access)
 
 The Parent is the only thing that can talk to the Enclave (over vsock). The Enclave must always return error states back to the Parent over vsock — never panic, never silently drop a request. Error messages sent back are sanitized (truncated to 200 chars in `enclave/src/main.rs::sanitize_error_message`) to avoid leaking sensitive data.
@@ -96,7 +96,7 @@ These pairs MUST be updated together — they implement opposite sides of the sa
 |--------|-------|
 | HPKE encryption/decryption | `api/src/app/encryptors.py` ↔ `enclave/src/hpke.rs` |
 | Request/response models | `api/src/app/models.py` ↔ `enclave/src/models.rs` |
-| Vsock framing protocol | `parent/src/protocol.rs` ↔ `enclave/src/protocol.rs` |
+| Vsock framing protocol | `vault-protocol/src/lib.rs` (shared crate used by both parent and enclave) |
 | CEL functions | `enclave/src/expressions.rs` + `enclave/src/functions.rs` |
 | New API routes | `api/src/app/routers/` |
 

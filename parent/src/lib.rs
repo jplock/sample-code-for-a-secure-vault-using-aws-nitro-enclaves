@@ -23,7 +23,7 @@
 //! - **HTTP API**: Axum-based server with rate limiting, timeouts, and body limits
 //! - **Credential Management**: Caches IAM credentials from IMDS with automatic refresh
 //! - **Enclave Management**: Discovers and launches Nitro Enclaves via `nitro-cli`
-//! - **vsock Communication**: Length-prefixed JSON protocol for enclave requests
+//! - **vsock Communication**: Versioned, length-framed CBOR protocol for enclave requests (see `vault_protocol`)
 //!
 //! ## Modules
 //!

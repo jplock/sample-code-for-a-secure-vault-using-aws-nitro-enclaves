@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn rejects_garbage_body() {
         // Valid header announcing a 4-byte body, but the body is not a
-        // postcard-encoded EnclaveRequest.
+        // CBOR-encoded EnclaveRequest.
         let mut buf = Vec::new();
         buf.push(WIRE_VERSION);
         buf.push(MessageType::Request as u8);

@@ -53,4 +53,4 @@ Secure vault for storing and protecting sensitive data (PII/PHI) using AWS Nitro
 - New vault fields: Update `api/src/app/models.py` and `enclave/src/models.rs`
 - CEL functions: Modify `enclave/src/expressions.rs` and `enclave/src/functions.rs`
 - API routes: Add to `api/src/app/routers/`
-- Protocol changes: Update both `parent/src/protocol.rs` and `enclave/src/protocol.rs`
+- Protocol changes: Update `vault-protocol/src/lib.rs` (shared crate used by both parent and enclave)
