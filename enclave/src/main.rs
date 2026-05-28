@@ -68,20 +68,25 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
         Err(err) => return send_sanitized_error(stream, err),
     };
 
+    // Short-circuit when there are no expressions to evaluate: skip the
+    // call entirely (avoiding the per-call HashMap clone of decrypted_fields
+    // that `execute_expressions` would otherwise do on its empty fast path).
     let (final_fields, cel_errors) = match payload.request.expressions {
-        Some(expressions) => match execute_expressions(&decrypted_fields, &expressions) {
-            Ok((fields, errs)) => (fields, errs),
-            Err(err) => {
-                println!("[enclave warning] expression execution failed");
-                // Only log error details in debug builds
-                #[cfg(debug_assertions)]
-                println!("[enclave debug] expression error: {:?}", err);
-                #[cfg(not(debug_assertions))]
-                let _ = err;
-                (decrypted_fields, Vec::new())
+        Some(ref expressions) if !expressions.is_empty() => {
+            match execute_expressions(&decrypted_fields, expressions) {
+                Ok((fields, errs)) => (fields, errs),
+                Err(err) => {
+                    println!("[enclave warning] expression execution failed");
+                    // Only log error details in debug builds
+                    #[cfg(debug_assertions)]
+                    println!("[enclave debug] expression error: {:?}", err);
+                    #[cfg(not(debug_assertions))]
+                    let _ = err;
+                    (decrypted_fields, Vec::new())
+                }
             }
-        },
-        None => (decrypted_fields, Vec::new()),
+        }
+        _ => (decrypted_fields, Vec::new()),
     };
 
     // Merge per-field decryption errors with CEL expression errors.

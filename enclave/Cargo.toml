@@ -43,4 +43,9 @@ zeroize = { workspace = true, features = ["zeroize_derive"] }
 mimalloc = { workspace = true, features = ["secure"] }
 
 [dev-dependencies]
+criterion = { workspace = true, features = ["cargo_bench_support"] }
 proptest = { workspace = true, features = ["std"] }
+
+[[bench]]
+name = "hpke_batch"
+harness = false

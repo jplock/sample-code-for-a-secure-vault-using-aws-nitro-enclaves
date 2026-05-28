@@ -16,6 +16,16 @@ use std::ptr;
 use std::slice;
 #[cfg(target_env = "musl")]
 use std::sync::OnceLock;
+#[cfg(target_env = "musl")]
+use std::sync::mpsc::{self, SyncSender};
+#[cfg(target_env = "musl")]
+use std::thread;
+#[cfg(target_env = "musl")]
+use std::time::Duration;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+#[cfg(target_env = "musl")]
+use zeroize::Zeroizing;
 
 #[cfg(target_env = "musl")]
 use ffi::{
@@ -52,6 +62,134 @@ fn ensure_sdk_initialized() {
             aws_nitro_enclaves_library_init(ptr::null_mut());
         }
     });
+}
+
+/// Identity used to decide whether a cached KMS client can be reused. We
+/// only key on region + access_key_id (not the secret or session token)
+/// because IMDS rotates the whole credential triple atomically; a change
+/// in access_key_id implies the secret/token changed too.
+///
+/// The fields are zeroized on drop so that the heap memory holding the
+/// previous credentials' identity cannot be recovered after a rotation.
+/// `Debug` is derived so test assertion failures are useful. The fields
+/// are not secret — `region` is public, `access_key_id` is the IAM
+/// identifier (the "username"; the secret material lives separately
+/// and is wrapped in `Zeroizing` at the request boundary).
+#[derive(Clone, Debug, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[allow(
+    dead_code,
+    reason = "host build has no consumers; the cfg(musl) worker constructs and compares these"
+)]
+struct CredentialKey {
+    region: Vec<u8>,
+    access_key_id: Vec<u8>,
+}
+
+/// Per-call timeout on the entire KMS decrypt round trip. Bounded
+/// shorter than the parent's `VSOCK_IO_TIMEOUT` (30s) so a stuck KMS
+/// call surfaces as an enclave error before the parent's connection
+/// timeout fires. Without this bound, a wedged `aws_kms_decrypt_blocking`
+/// call would block decryption for every other concurrent request
+/// until the SDK's own (longer) internal timeout returned.
+#[cfg(target_env = "musl")]
+const KMS_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Channel capacity matches the per-enclave concurrent-connection cap so
+/// the worker queue never grows beyond what the listener will accept.
+#[cfg(target_env = "musl")]
+const KMS_WORKER_QUEUE: usize = 32;
+
+/// Request sent from a caller thread to the KMS worker. Sensitive
+/// credential fields are wrapped in `Zeroizing` so they are erased from
+/// the heap after the worker copies them into the C SDK's `aws_string`s.
+#[cfg(target_env = "musl")]
+struct KmsRequest {
+    key: CredentialKey,
+    secret_access_key: Zeroizing<Vec<u8>>,
+    session_token: Zeroizing<Vec<u8>>,
+    ciphertext: Vec<u8>,
+    response_tx: SyncSender<Result<Vec<u8>, Error>>,
+}
+
+/// A KMS client cached together with the credentials it was built from.
+/// Lives inside the worker thread only — no Send/Sync required.
+#[cfg(target_env = "musl")]
+struct CachedClient {
+    key: CredentialKey,
+    resources: KmsResources,
+}
+
+/// Lazily-spawned worker that owns the cached KMS client and serializes
+/// `aws_kms_decrypt_blocking` calls.
+///
+/// Why a worker thread instead of a mutex over the client:
+///
+/// - The `aws-nitro-enclaves-sdk-c` library is event-loop based; we
+///   cannot independently verify that a single client handle is safe
+///   under concurrent decrypt calls. Funneling all calls through one
+///   thread keeps the SDK in a single-threaded usage pattern.
+/// - Callers wait on the response channel with a bounded timeout
+///   ([`KMS_REQUEST_TIMEOUT`]). If KMS is stuck, the caller returns an
+///   error after the timeout while the worker is free to handle the
+///   next request; a wedged KMS handshake no longer holds an
+///   enclave-wide lock indefinitely.
+/// - The cache lives inside the worker, so the raw FFI pointers in
+///   `KmsResources` never cross a thread boundary — the `Send`
+///   discipline is enforced by ownership rather than by an
+///   `unsafe impl Send`.
+#[cfg(target_env = "musl")]
+static KMS_WORKER: OnceLock<SyncSender<KmsRequest>> = OnceLock::new();
+
+#[cfg(target_env = "musl")]
+fn kms_worker() -> &'static SyncSender<KmsRequest> {
+    KMS_WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<KmsRequest>(KMS_WORKER_QUEUE);
+        thread::Builder::new()
+            .name("kms-worker".into())
+            .spawn(move || {
+                // Cache lives entirely within this thread; raw FFI
+                // pointers never escape.
+                let mut cached: Option<CachedClient> = None;
+                while let Ok(req) = rx.recv() {
+                    let result = handle_kms_request(&mut cached, &req);
+                    // If the caller already timed out the response
+                    // channel is dropped — `send` returns Err; ignore.
+                    let _ = req.response_tx.send(result);
+                }
+                // The receiver closes when the OnceLock-owned sender
+                // is dropped; at that point the process is shutting
+                // down and the worker exits.
+            })
+            .ok();
+        tx
+    })
+}
+
+#[cfg(target_env = "musl")]
+fn handle_kms_request(
+    cached: &mut Option<CachedClient>,
+    req: &KmsRequest,
+) -> Result<Vec<u8>, Error> {
+    let needs_rebuild = match cached {
+        Some(c) => c.key != req.key,
+        None => true,
+    };
+    if needs_rebuild {
+        if let Some(mut old) = cached.take() {
+            // Tear down the old client + credential strings in reverse
+            // alloc order before allocating the new ones so the SDK
+            // doesn't briefly hold two clients open against the same
+            // vsock proxy.
+            unsafe { old.resources.cleanup() };
+        }
+        let new = build_cached_client(&req.key, &req.secret_access_key, &req.session_token)?;
+        *cached = Some(new);
+    }
+    let entry = match cached.as_mut() {
+        Some(c) => c,
+        None => return Err(Error::SdkKmsClientError),
+    };
+    unsafe { do_decrypt(&mut entry.resources, &req.ciphertext) }
 }
 
 /// Errors that can occur during KMS operations via FFI
@@ -217,31 +355,65 @@ pub fn kms_decrypt(
     aws_session_token: &[u8],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    // Step 1: Ensure the SDK is initialized exactly once for this process.
-    // Safe to call concurrently from multiple threads; the unsafe FFI call is encapsulated
-    // inside the `OnceLock::get_or_init` closure.
     ensure_sdk_initialized();
 
+    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let req = KmsRequest {
+        key: CredentialKey {
+            region: aws_region.to_vec(),
+            access_key_id: aws_key_id.to_vec(),
+        },
+        secret_access_key: Zeroizing::new(aws_secret_key.to_vec()),
+        session_token: Zeroizing::new(aws_session_token.to_vec()),
+        ciphertext: ciphertext.to_vec(),
+        response_tx,
+    };
+
+    // Bounded sync send: if the worker queue is full (>KMS_WORKER_QUEUE
+    // requests in flight), the caller waits its turn instead of growing
+    // the queue without bound.
+    if kms_worker().send(req).is_err() {
+        // Worker thread died; only happens if the worker panicked, which
+        // with panic=abort means the whole process aborts anyway.
+        return Err(Error::SdkKmsClientError);
+    }
+
+    match response_rx.recv_timeout(KMS_REQUEST_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err(Error::SdkKmsDecryptError),
+    }
+}
+
+/// Build a fresh `KmsResources` (allocator, credential strings, config,
+/// client) for the given credentials. Returns an error if any FFI step
+/// fails; partial state is cleaned up before returning.
+#[cfg(target_env = "musl")]
+fn build_cached_client(
+    key: &CredentialKey,
+    aws_secret_key: &[u8],
+    aws_session_token: &[u8],
+) -> Result<CachedClient, Error> {
     let mut resources = KmsResources::new();
 
     unsafe {
-        // Step 2: Get allocator for subsequent allocations
         resources.allocator = aws_nitro_enclaves_get_allocator();
         if resources.allocator.is_null() {
             resources.cleanup();
             return Err(Error::SdkInitError);
         }
 
-        // Step 3: Create aws_string instances for credentials
         resources.region =
-            aws_string_new_from_array(resources.allocator, aws_region.as_ptr(), aws_region.len());
+            aws_string_new_from_array(resources.allocator, key.region.as_ptr(), key.region.len());
         if resources.region.is_null() {
             resources.cleanup();
             return Err(Error::SdkGenericError);
         }
 
-        resources.access_key_id =
-            aws_string_new_from_array(resources.allocator, aws_key_id.as_ptr(), aws_key_id.len());
+        resources.access_key_id = aws_string_new_from_array(
+            resources.allocator,
+            key.access_key_id.as_ptr(),
+            key.access_key_id.len(),
+        );
         if resources.access_key_id.is_null() {
             resources.cleanup();
             return Err(Error::SdkGenericError);
@@ -267,15 +439,12 @@ pub fn kms_decrypt(
             return Err(Error::SdkGenericError);
         }
 
-        // Step 4: Configure vsock endpoint (CID 3, port 8000)
         let mut endpoint = aws_socket_endpoint {
             address: [0u8; AWS_ADDRESS_MAX_LEN],
             port: AWS_NE_VSOCK_PROXY_PORT,
         };
-        // Copy parent CID address ("3\0")
         endpoint.address[..AWS_NE_VSOCK_PROXY_ADDR.len()].copy_from_slice(&AWS_NE_VSOCK_PROXY_ADDR);
 
-        // Step 5: Create KMS client configuration
         resources.config = aws_nitro_enclaves_kms_client_config_default(
             resources.region,
             &mut endpoint,
@@ -289,61 +458,71 @@ pub fn kms_decrypt(
             return Err(Error::SdkKmsConfigError);
         }
 
-        // Step 6: Create KMS client
         resources.client = aws_nitro_enclaves_kms_client_new(resources.config);
         if resources.client.is_null() {
             resources.cleanup();
             return Err(Error::SdkKmsClientError);
         }
+    }
 
-        // Step 7: Prepare ciphertext buffer (does not copy data)
-        let ciphertext_buf = aws_byte_buf {
-            len: ciphertext.len(),
-            buffer: ciphertext.as_ptr() as *mut u8,
-            capacity: ciphertext.len(),
-            allocator: ptr::null_mut(),
-        };
+    Ok(CachedClient {
+        key: key.clone(),
+        resources,
+    })
+}
 
-        // Step 8: Prepare plaintext output buffer (will be allocated by SDK)
-        let mut plaintext_buf = aws_byte_buf {
-            len: 0,
-            buffer: ptr::null_mut(),
-            capacity: 0,
-            allocator: ptr::null_mut(),
-        };
+/// Perform a single decrypt call against an already-built client. The
+/// per-request plaintext buffer is securely cleaned up before returning.
+///
+/// # Safety
+///
+/// `resources.client` must be a valid client created by
+/// `aws_nitro_enclaves_kms_client_new`. The caller must hold the
+/// `CLIENT_CACHE` mutex.
+#[cfg(target_env = "musl")]
+unsafe fn do_decrypt(resources: &mut KmsResources, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+    let ciphertext_buf = aws_byte_buf {
+        len: ciphertext.len(),
+        buffer: ciphertext.as_ptr() as *mut u8,
+        capacity: ciphertext.len(),
+        allocator: ptr::null_mut(),
+    };
 
-        // Step 9: Call KMS decrypt (generates attestation document internally)
-        // Pass null for key_id and encryption_algorithm to use defaults
-        let rc = aws_kms_decrypt_blocking(
+    let mut plaintext_buf = aws_byte_buf {
+        len: 0,
+        buffer: ptr::null_mut(),
+        capacity: 0,
+        allocator: ptr::null_mut(),
+    };
+
+    let rc = unsafe {
+        aws_kms_decrypt_blocking(
             resources.client,
-            ptr::null_mut(), // key_id (use default from ciphertext)
-            ptr::null_mut(), // encryption_algorithm (use default)
+            ptr::null_mut(),
+            ptr::null_mut(),
             &ciphertext_buf,
             &mut plaintext_buf,
-        );
+        )
+    };
 
-        if rc != 0 {
-            // Store buffer for cleanup even on error
-            resources.plaintext_buf = Some(plaintext_buf);
-            resources.cleanup();
-            return Err(Error::SdkKmsDecryptError);
+    if rc != 0 {
+        // Even on KMS error the SDK may have allocated the buffer; clean it up.
+        if !plaintext_buf.buffer.is_null() {
+            unsafe { aws_byte_buf_clean_up_secure(&mut plaintext_buf) };
         }
-
-        // Step 10: Copy plaintext to Vec<u8> before cleanup
-        let plaintext = if !plaintext_buf.buffer.is_null() && plaintext_buf.len > 0 {
-            slice::from_raw_parts(plaintext_buf.buffer, plaintext_buf.len).to_vec()
-        } else {
-            Vec::new()
-        };
-
-        // Step 11: Store buffer for secure cleanup
-        resources.plaintext_buf = Some(plaintext_buf);
-
-        // Step 12: Clean up all resources in reverse order
-        resources.cleanup();
-
-        Ok(plaintext)
+        return Err(Error::SdkKmsDecryptError);
     }
+
+    let plaintext = if !plaintext_buf.buffer.is_null() && plaintext_buf.len > 0 {
+        unsafe { slice::from_raw_parts(plaintext_buf.buffer, plaintext_buf.len) }.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    // Securely erase the SDK-allocated plaintext buffer before returning.
+    unsafe { aws_byte_buf_clean_up_secure(&mut plaintext_buf) };
+
+    Ok(plaintext)
 }
 
 /// Stub implementation for non-musl platforms (compilation only).
@@ -423,6 +602,49 @@ mod tests {
     fn test_error_implements_std_error() {
         fn assert_std_error<E: std::error::Error>() {}
         assert_std_error::<Error>();
+    }
+
+    // ---------- CredentialKey behavior (host-testable) ----------
+    //
+    // The cfg(musl) worker uses these properties to decide whether to
+    // rebuild the cached KMS client. Tested here so the rebuild logic
+    // is covered by host CI in addition to the docker-build path.
+
+    #[test]
+    fn credential_key_same_region_same_id_is_equal() {
+        let a = CredentialKey {
+            region: b"us-east-1".to_vec(),
+            access_key_id: b"AKIATEST".to_vec(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn credential_key_differs_on_access_key_change() {
+        // This is the case that triggers a rebuild on credential rotation.
+        let a = CredentialKey {
+            region: b"us-east-1".to_vec(),
+            access_key_id: b"AKIAOLD".to_vec(),
+        };
+        let b = CredentialKey {
+            region: b"us-east-1".to_vec(),
+            access_key_id: b"AKIANEW".to_vec(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn credential_key_differs_on_region_change() {
+        let a = CredentialKey {
+            region: b"us-east-1".to_vec(),
+            access_key_id: b"AKIATEST".to_vec(),
+        };
+        let b = CredentialKey {
+            region: b"us-west-2".to_vec(),
+            access_key_id: b"AKIATEST".to_vec(),
+        };
+        assert_ne!(a, b);
     }
 
     /// Test that Error implements Display trait with descriptive messages
