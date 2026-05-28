@@ -16,6 +16,12 @@
 //!   HPKE work is attempted.
 //! - [`decrypt_fields`] — the parallel HPKE decrypt pipeline.
 
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "enclave stdout/stderr is the only diagnostic channel in --debug-mode (visible via nitro-cli console); production stdout is discarded by design. See `.claude/memory/enclave-no-observability.md`."
+)]
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -177,7 +183,12 @@ pub fn decrypt_fields(req: &EnclaveRequest) -> Result<(HashMap<String, Value>, V
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests use unwrap/expect/indexing for terseness"
+)]
 mod tests {
     use super::*;
 

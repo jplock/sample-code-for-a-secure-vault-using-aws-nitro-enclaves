@@ -1,6 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::exit,
+    reason = "enclave stdout/stderr is the only diagnostic channel in --debug-mode (visible via nitro-cli console); production stdout is discarded. process::exit on bind failure is the correct response — the enclave cannot do anything useful without a listener. See `.claude/memory/enclave-no-observability.md`."
+)]
+
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

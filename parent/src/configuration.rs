@@ -84,7 +84,7 @@ impl Default for ParentOptions {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, reason = "tests use unwrap for terseness")]
 mod tests {
     use super::*;
     use clap::Parser;

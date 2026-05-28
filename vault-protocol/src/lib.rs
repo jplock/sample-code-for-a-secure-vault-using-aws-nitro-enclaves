@@ -365,7 +365,12 @@ fn read_frame<R: Read>(reader: &mut R, expected: MessageType) -> Result<Vec<u8>>
 // =============================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests use unwrap/expect/indexing for terseness"
+)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

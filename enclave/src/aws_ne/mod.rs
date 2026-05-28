@@ -368,7 +368,12 @@ pub fn kms_decrypt(
 // =============================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests use unwrap/expect/indexing for terseness"
+)]
 mod tests {
     use super::*;
 

@@ -250,7 +250,7 @@ pub struct ParentResponse {
 // when forwarding an API request to the enclave.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, reason = "tests use unwrap for terseness")]
 mod tests {
     use super::*;
 
