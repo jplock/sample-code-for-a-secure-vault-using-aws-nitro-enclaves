@@ -147,27 +147,42 @@ pub fn decrypt_fields(req: &EnclaveRequest) -> Result<(HashMap<String, Value>, V
         println!("[enclave] vault_id: {:?}", &req.request.vault_id);
     }
 
-    let decrypted_fields: HashMap<String, Value> = req
-        .request
-        .fields
-        .par_iter()
-        .map(|(field, ef)| {
-            let decrypted = decrypt_value(hpke_suite, &private_key, info, field, ef)
-                .unwrap_or_else(|err| {
-                    match errors.lock() {
-                        Ok(mut err_vec) => err_vec.push(err),
-                        Err(poisoned) => {
-                            eprintln!(
-                                "[enclave critical] mutex poisoned during decryption — a thread may have panicked"
-                            );
-                            poisoned.into_inner().push(err);
-                        }
+    // Sequential fast path for single-field requests: rayon's work-
+    // stealing has nontrivial fixed cost (~27µs above base HPKE on our
+    // bench), and the crossover with sequential decrypt is at exactly
+    // one field — even two fields run faster in parallel. So we only
+    // bypass rayon when there is one field. See
+    // `enclave/benches/hpke_batch.rs` for the measurements.
+    let decrypt_one = |field: &String, ef: &EncryptedField| -> (String, Value) {
+        let decrypted = decrypt_value(hpke_suite, &private_key, info, field, ef)
+            .unwrap_or_else(|err| {
+                match errors.lock() {
+                    Ok(mut err_vec) => err_vec.push(err),
+                    Err(poisoned) => {
+                        eprintln!(
+                            "[enclave critical] mutex poisoned during decryption — a thread may have panicked"
+                        );
+                        poisoned.into_inner().push(err);
                     }
-                    Value::Null
-                });
-            (field.clone(), decrypted)
-        })
-        .collect();
+                }
+                Value::Null
+            });
+        (field.clone(), decrypted)
+    };
+
+    let decrypted_fields: HashMap<String, Value> = if req.request.fields.len() <= 1 {
+        req.request
+            .fields
+            .iter()
+            .map(|(field, ef)| decrypt_one(field, ef))
+            .collect()
+    } else {
+        req.request
+            .fields
+            .par_iter()
+            .map(|(field, ef)| decrypt_one(field, ef))
+            .collect()
+    };
 
     let final_errors = match errors.into_inner() {
         Ok(errs) => errs,

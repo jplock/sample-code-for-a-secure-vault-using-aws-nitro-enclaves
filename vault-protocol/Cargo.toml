@@ -21,4 +21,9 @@ tracing = { workspace = true, features = ["attributes"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [dev-dependencies]
+criterion = { workspace = true, features = ["cargo_bench_support"] }
 proptest = { workspace = true, features = ["std"] }
+
+[[bench]]
+name = "roundtrip"
+harness = false

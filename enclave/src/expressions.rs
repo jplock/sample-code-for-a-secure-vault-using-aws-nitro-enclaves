@@ -2,14 +2,61 @@
 // SPDX-License-Identifier: MIT-0
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Result, anyhow, bail};
 use cel_interpreter::Value as celValue;
-use cel_interpreter::{Context, Program};
+use cel_interpreter::{Context, ParseErrors, Program};
 use serde_json::Value;
 
 use crate::constants::{MAX_EXPRESSION_LENGTH, MAX_EXPRESSIONS};
 use crate::functions;
+
+/// Upper bound on the number of compiled CEL programs cached in memory.
+/// Sized for the legitimate operator pattern (a handful of expressions
+/// reused across many requests). Once full, further unique expressions
+/// compile but bypass the cache, so adversarial inputs cannot make
+/// memory grow without bound.
+const MAX_CACHED_PROGRAMS: usize = 1024;
+
+static PROGRAM_CACHE: OnceLock<RwLock<HashMap<String, Arc<Program>>>> = OnceLock::new();
+
+fn program_cache() -> &'static RwLock<HashMap<String, Arc<Program>>> {
+    PROGRAM_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Compile `expression` or return the cached compiled program.
+///
+/// Lock poisoning (a thread panicking while holding the cache lock) is
+/// recovered — the cache content is just data, no invariants are at risk.
+fn get_or_compile(expression: &str) -> Result<Arc<Program>, ParseErrors> {
+    let cache = program_cache();
+
+    // Fast path: shared read lock.
+    {
+        let guard = match cache.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(p) = guard.get(expression) {
+            return Ok(Arc::clone(p));
+        }
+    }
+
+    // Slow path: compile, then take the exclusive lock to insert.
+    let program = Arc::new(Program::compile(expression)?);
+
+    let mut guard = match cache.write() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.len() < MAX_CACHED_PROGRAMS {
+        guard
+            .entry(expression.to_string())
+            .or_insert_with(|| Arc::clone(&program));
+    }
+    Ok(program)
+}
 
 /// Rejects requests that try to enqueue more CEL expressions than the
 /// enclave is willing to evaluate in a single call. Surfaced as a hard
@@ -86,7 +133,7 @@ pub fn execute_expressions(
     }
 
     for (field, expression) in expressions {
-        let program = Program::compile(expression.as_str());
+        let program = get_or_compile(expression.as_str());
 
         let value: celValue = match program {
             Ok(program) => match program.execute(&context) {
@@ -426,6 +473,25 @@ mod tests {
     #[test]
     fn test_validate_expressions_count_zero() {
         assert!(validate_expressions_count(0).is_ok());
+    }
+
+    #[test]
+    fn test_get_or_compile_returns_same_arc_on_hit() {
+        // Same input string twice should return the same cached Arc.
+        let expr = "test_unique_expression_for_cache_hit.to_uppercase()";
+        let first = get_or_compile(expr).unwrap();
+        let second = get_or_compile(expr).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second call should return the cached Arc, not recompile"
+        );
+    }
+
+    #[test]
+    fn test_get_or_compile_rejects_invalid_expression() {
+        // Parse error must surface; we do NOT cache failed compilations.
+        let result = get_or_compile("this is ((( definitely not a valid CEL");
+        assert!(result.is_err());
     }
 
     #[test]

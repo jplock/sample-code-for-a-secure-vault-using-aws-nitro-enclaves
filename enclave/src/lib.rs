@@ -20,3 +20,8 @@ pub(crate) mod hpke;
 pub(crate) mod kms;
 pub mod models;
 pub mod utils;
+
+// Re-export the per-field HPKE decrypt entry point so external benches
+// (under `benches/`) can drive it without widening the `hpke` module's
+// visibility.
+pub use crate::hpke::decrypt_value;

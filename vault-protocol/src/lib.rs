@@ -295,17 +295,19 @@ fn write_frame<W: Write>(writer: &mut W, msg_type: MessageType, body: &[u8]) -> 
         );
     }
 
-    let mut header = [0u8; HEADER_LEN];
-    header[HEADER_VERSION_OFFSET] = WIRE_VERSION;
-    header[HEADER_TYPE_OFFSET] = msg_type as u8;
-    header[HEADER_LEN_OFFSET..HEADER_LEN].copy_from_slice(&len.to_le_bytes());
+    // Concatenate header + body and emit in a single `write_all` so the
+    // frame goes out in one syscall on `VsockStream`. The 6-byte header
+    // is tiny next to the body; the upfront capacity hint costs one
+    // alloc per send but halves the kernel round-trips on the hot path.
+    let mut frame: Vec<u8> = Vec::with_capacity(HEADER_LEN.saturating_add(body.len()));
+    frame.push(WIRE_VERSION);
+    frame.push(msg_type as u8);
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(body);
 
     writer
-        .write_all(&header)
-        .map_err(|err| anyhow!("failed to write frame header: {err}"))?;
-    writer
-        .write_all(body)
-        .map_err(|err| anyhow!("failed to write frame body: {err}"))?;
+        .write_all(&frame)
+        .map_err(|err| anyhow!("failed to write frame: {err}"))?;
     Ok(())
 }
 
