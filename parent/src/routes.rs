@@ -18,22 +18,18 @@
 use std::sync::Arc;
 
 use crate::application::AppState;
-use crate::cbor::{CBOR_CONTENT_TYPE, Cbor};
+use crate::cbor::Cbor;
 use crate::constants;
 use crate::errors::AppError;
-use crate::models::{
-    EnclaveDescribeInfo, EnclaveRunInfo, ParentRequest, ParentRequestCbor, ParentResponse,
-};
-use crate::wire_encoding::{build_enclave_request, build_enclave_request_cbor};
+use crate::models::{EnclaveDescribeInfo, EnclaveRunInfo, ParentRequest, ParentResponse};
+use crate::wire_encoding::build_enclave_request;
 
 use axum::Json;
-use axum::body::Bytes;
-use axum::extract::{FromRequest, Request, State};
-use axum::http::{HeaderMap, header};
-use axum::response::{IntoResponse, Response};
+use axum::extract::State;
+use axum::response::IntoResponse;
 use serde_json::json;
 use validator::Validate;
-use vault_protocol::{Credential as WireCredential, EnclaveRequest, EnclaveResponse};
+use vault_protocol::{Credential as WireCredential, EnclaveResponse};
 
 /// Health check endpoint.
 ///
@@ -86,149 +82,52 @@ pub async fn run_enclave(
 // not implement `Serialize`, which is appropriate — credentials should
 // not be observable from outside this process.
 
-/// Returns true when the request's `Content-Type` header indicates a
-/// CBOR body. Anything else (including absent header) falls through to
-/// the JSON path.
-fn is_cbor_content_type(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| {
-            // Tolerate parameters like `application/cbor; charset=binary`.
-            let media_type = s.split(';').next().unwrap_or(s).trim();
-            media_type.eq_ignore_ascii_case(CBOR_CONTENT_TYPE)
-        })
-}
-
-/// Returns true when the request's `Accept` header explicitly asks for
-/// CBOR. `*/*` and missing fall through to the JSON default so existing
-/// clients keep getting JSON back.
-fn wants_cbor_response(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| {
-            s.split(',').any(|part| {
-                let media_type = part.split(';').next().unwrap_or(part).trim();
-                media_type.eq_ignore_ascii_case(CBOR_CONTENT_TYPE)
-            })
-        })
-}
-
-/// Holds a deserialized request body in whichever shape arrived on the
-/// wire. Both shapes carry equivalent data; only the translation to
-/// `vault_protocol::EnclaveRequest` differs.
-enum ParsedBody {
-    Json(ParentRequest),
-    Cbor(ParentRequestCbor),
-}
-
-impl ParsedBody {
-    fn vault_id(&self) -> &str {
-        match self {
-            Self::Json(p) => &p.vault_id,
-            Self::Cbor(p) => &p.vault_id,
-        }
-    }
-
-    fn into_enclave_request(self, credential: WireCredential) -> anyhow::Result<EnclaveRequest> {
-        match self {
-            Self::Json(p) => build_enclave_request(p, credential),
-            Self::Cbor(p) => build_enclave_request_cbor(p, credential),
-        }
-    }
-}
-
 /// Decrypts vault fields using a Nitro Enclave.
 ///
 /// Main endpoint for decrypting PII/PHI data stored in the vault. The
-/// handler dispatches on the request `Content-Type` to decode the body
-/// (JSON or CBOR), runs the shared validate → credentials → enclave →
-/// vsock pipeline, then serializes the response in whichever format
-/// the client's `Accept` header asks for (defaulting to JSON).
+/// request/response wire format is CBOR (`application/cbor`); the API
+/// Lambda is the only client and always sends CBOR. JSON support was
+/// removed once the API → parent leg fully migrated.
 ///
-/// # Content negotiation
+/// # Request flow
 ///
-/// | request `Content-Type` | request `Accept` | wire shape in / out |
-/// |---|---|---|
-/// | `application/cbor`     | contains `application/cbor` | CBOR / CBOR |
-/// | `application/cbor`     | other / missing             | CBOR / JSON |
-/// | other / missing        | contains `application/cbor` | JSON / CBOR |
-/// | other / missing        | other / missing             | JSON / JSON |
+/// 1. Validate the deserialized [`ParentRequest`].
+/// 2. Check for available enclaves (fail fast on none).
+/// 3. Fetch IAM credentials from the IMDS cache.
+/// 4. Build the binary `EnclaveRequest` via
+///    [`build_enclave_request`].
+/// 5. Pick a random enclave for load balancing.
+/// 6. Send over vsock (blocking call wrapped in `spawn_blocking`).
+/// 7. Return the response as CBOR.
 ///
 /// # Errors
 ///
-/// - [`AppError::ValidationError`] - body parse, validation, or translation failure
-/// - [`AppError::EnclaveNotFound`] - no enclaves available
-/// - [`AppError::InternalServerError`] - credential or enclave communication failure
-#[tracing::instrument(skip(state, req))]
+/// - [`AppError::ValidationError`] — request validation or translation failure
+/// - [`AppError::EnclaveNotFound`] — no enclaves available
+/// - [`AppError::InternalServerError`] — credential or enclave communication failure
+#[tracing::instrument(skip(state, request))]
 pub async fn decrypt(
     State(state): State<Arc<AppState>>,
-    req: Request,
-) -> Result<Response, AppError> {
-    let (parts, body) = req.into_parts();
-    let cbor_in = is_cbor_content_type(&parts.headers);
-    let cbor_out = wants_cbor_response(&parts.headers);
+    Cbor(request): Cbor<ParentRequest>,
+) -> Result<Cbor<ParentResponse>, AppError> {
+    // 1. Validate incoming request against size limits and format rules.
+    tracing::debug!(
+        "[parent] validating decrypt request for vault_id: {}",
+        request.vault_id
+    );
+    request.validate().map_err(|e| {
+        tracing::error!("[parent] validation failed: {}", e);
+        AppError::ValidationError(e.to_string())
+    })?;
 
-    // Read the body once. tower-http's RequestBodyLimitLayer already
-    // caps payload size, and `Bytes::from_request` surfaces a `413
-    // Payload Too Large` rejection if the cap is hit. We pass that
-    // rejection through unchanged so the size-limit response shape
-    // stays exactly as it did before this handler was rewritten for
-    // content negotiation.
-    let req = Request::from_parts(parts, body);
-    let body_bytes = match Bytes::from_request(req, &()).await {
-        Ok(b) => b,
-        Err(rejection) => {
-            tracing::error!("[parent] failed to read request body: {:?}", rejection);
-            return Ok(rejection.into_response());
-        }
-    };
-
-    // 1. Deserialize + validate, path-specific. We keep the parsed
-    // value through the next few steps so the translator runs once the
-    // wire credential is in hand.
-    let parsed: ParsedBody = if cbor_in {
-        let p: ParentRequestCbor = ciborium::de::from_reader(&*body_bytes).map_err(|e| {
-            tracing::error!("[parent] CBOR deserialization failed: {:?}", e);
-            AppError::ValidationError(format!("invalid CBOR body: {e}"))
-        })?;
-        tracing::debug!(
-            "[parent] validating CBOR decrypt request for vault_id: {}",
-            p.vault_id
-        );
-        p.validate().map_err(|e| {
-            tracing::error!("[parent] CBOR validation failed: {}", e);
-            AppError::ValidationError(e.to_string())
-        })?;
-        ParsedBody::Cbor(p)
-    } else {
-        let p: ParentRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
-            tracing::error!("[parent] JSON deserialization failed: {:?}", e);
-            AppError::ValidationError(format!("invalid JSON body: {e}"))
-        })?;
-        tracing::debug!(
-            "[parent] validating JSON decrypt request for vault_id: {}",
-            p.vault_id
-        );
-        p.validate().map_err(|e| {
-            tracing::error!("[parent] JSON validation failed: {}", e);
-            AppError::ValidationError(e.to_string())
-        })?;
-        ParsedBody::Json(p)
-    };
-
-    // 2. Get available enclaves early to fail fast if none are available
+    // 2. Get available enclaves early to fail fast if none are available.
     let enclaves: Vec<EnclaveDescribeInfo> = state.enclaves.get_enclaves().await;
     if enclaves.is_empty() {
         return Err(AppError::EnclaveNotFound);
     }
 
-    // 3. Fetch (or use cached) IAM credentials from IMDS
-    tracing::debug!(
-        "[parent] fetching credentials for vault_id: {}",
-        parsed.vault_id()
-    );
+    // 3. Fetch (or use cached) IAM credentials from IMDS.
+    tracing::debug!("[parent] fetching credentials from cache");
     let credential = state.credentials.get_credentials().await.map_err(|e| {
         tracing::error!("[parent] failed to get credentials: {:?}", e);
         e
@@ -236,14 +135,13 @@ pub async fn decrypt(
 
     // Translate the SDK `Credentials` into the wire crate's typed,
     // zeroize-on-drop `Credential` (orphan rules prevent an `impl From`
-    // here), then build the binary EnclaveRequest. Whichever path the
-    // body arrived on, the resulting `EnclaveRequest` is identical.
+    // here), then build the binary EnclaveRequest.
     let wire_credential = WireCredential::new(
         credential.access_key_id().to_string(),
         credential.secret_access_key().to_string(),
         credential.session_token().unwrap_or_default().to_string(),
     );
-    let enclave_req = parsed.into_enclave_request(wire_credential).map_err(|e| {
+    let enclave_req = build_enclave_request(request, wire_credential).map_err(|e| {
         tracing::error!(
             "[parent] failed to translate request to wire format: {:?}",
             e
@@ -251,7 +149,7 @@ pub async fn decrypt(
         AppError::ValidationError(e.to_string())
     })?;
 
-    // 4. Select a random enclave for load balancing
+    // 4. Select a random enclave for load balancing.
     let index = fastrand::usize(..enclaves.len());
     let enclave = enclaves.get(index).ok_or(AppError::EnclaveNotFound)?;
     let cid: u32 = enclave
@@ -287,12 +185,7 @@ pub async fn decrypt(
         errors: response.errors,
     };
 
-    // 7. Serialize in whichever format the client asked for.
-    if cbor_out {
-        Ok(Cbor(parent_response).into_response())
-    } else {
-        Ok(Json(parent_response).into_response())
-    }
+    Ok(Cbor(parent_response))
 }
 
 #[cfg(test)]

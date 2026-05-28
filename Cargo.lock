@@ -1741,7 +1741,6 @@ dependencies = [
  "axum-test",
  "ciborium",
  "clap",
- "data-encoding",
  "fastrand",
  "proptest",
  "serde",

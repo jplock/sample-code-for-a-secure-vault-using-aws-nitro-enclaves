@@ -11,7 +11,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{FromRequest, Request},
+    extract::{FromRequest, Request, rejection::BytesRejection},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -26,18 +26,26 @@ pub const CBOR_CONTENT_TYPE: &str = "application/cbor";
 pub struct Cbor<T>(pub T);
 
 /// Rejection produced when CBOR decoding fails or the body cannot be
-/// read. Surfaced as `400 Bad Request` — these are client-side errors.
+/// read.
+///
+/// `Deserialization` is surfaced as `400 Bad Request`. `BodyRead`
+/// preserves the underlying [`BytesRejection`]'s status code — that's
+/// how a body-size-limit overflow keeps reporting `413 Payload Too
+/// Large` instead of being flattened to `400`.
 #[derive(thiserror::Error, Debug)]
 pub enum CborRejection {
     #[error("invalid CBOR body: {0}")]
     Deserialization(String),
-    #[error("failed to read request body: {0}")]
-    BodyRead(String),
+    #[error("{0}")]
+    BodyRead(#[from] BytesRejection),
 }
 
 impl IntoResponse for CborRejection {
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, self.to_string()).into_response()
+        match self {
+            Self::Deserialization(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+            Self::BodyRead(rejection) => rejection.into_response(),
+        }
     }
 }
 
@@ -49,9 +57,7 @@ where
     type Rejection = CborRejection;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let bytes = Bytes::from_request(req, state)
-            .await
-            .map_err(|e| CborRejection::BodyRead(e.to_string()))?;
+        let bytes = Bytes::from_request(req, state).await?;
         ciborium::de::from_reader(&*bytes)
             .map(Cbor)
             .map_err(|e| CborRejection::Deserialization(e.to_string()))
