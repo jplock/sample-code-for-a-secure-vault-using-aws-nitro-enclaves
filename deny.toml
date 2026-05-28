@@ -4,13 +4,12 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-  # RUSTSEC-2024-0436: `paste` is unmaintained. It is a transitive dependency
-  # of `cel-interpreter = 0.10.0`. No patched version of cel-interpreter is
-  # available; upgrading is out of scope for this PR. The advisory is
-  # informational (no exploitable vulnerability), so suppression is safe here.
-  { id = "RUSTSEC-2024-0436", reason = "transitive dep via cel-interpreter; no patched upstream available" },
-]
+# The `paste` advisory (RUSTSEC-2024-0436) that previously forced an
+# ignore here was carried in via cel-interpreter 0.10.0. The renamed
+# `cel` 0.13.0 crate switched to `pastey`, so the suppression is no
+# longer needed. If a new transitive advisory needs ignoring later,
+# add it here with an explicit reason.
+ignore = []
 
 [licenses]
 version = 2
@@ -33,8 +32,8 @@ allow = [
 [bans]
 # Warn on duplicate versions rather than denying — the workspace has
 # unavoidable transitive duplicates (e.g., http 0.2/1.x from AWS SDK,
-# thiserror 1.x/2.x from cel-interpreter vs parent). Flip to "deny"
-# once the workspace is cleaned up.
+# thiserror 1.x/2.x from cel vs parent). Flip to "deny" once the
+# workspace is cleaned up.
 multiple-versions = "warn"
 
 [sources]

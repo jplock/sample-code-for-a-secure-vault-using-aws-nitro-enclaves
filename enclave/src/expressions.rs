@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Result, anyhow, bail};
-use cel_interpreter::Value as celValue;
-use cel_interpreter::{Context, ParseErrors, Program};
+use cel::Value as celValue;
+use cel::{Context, ParseErrors, Program};
 use serde_json::Value;
 
 use crate::constants::{MAX_EXPRESSION_LENGTH, MAX_EXPRESSIONS};
