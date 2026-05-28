@@ -19,7 +19,6 @@
 * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 
-import base64
 import datetime
 import json
 import time
@@ -39,7 +38,6 @@ __all__ = [
     "error_response",
     "now_micros",
     "build_key",
-    "b64_encode",
     "hpke_encap_key_size",
     "decode_v1_field",
     "decode_v2_field",
@@ -116,10 +114,6 @@ def build_key(*args: str) -> str:
     Build a key from a list of arguments
     """
     return constants.KEY_SEPARATOR.join(args)
-
-
-def b64_encode(value: Union[bytes, Binary]) -> str:
-    return base64.standard_b64encode(bytes(value)).decode()
 
 
 def hpke_encap_key_size(suite_id: bytes) -> int:

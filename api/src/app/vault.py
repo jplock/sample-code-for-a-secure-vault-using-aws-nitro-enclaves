@@ -32,8 +32,7 @@ from app import constants, utils, exceptions, encryptors
 from app.resources import TransactionWriter
 
 # MIME type for CBOR payloads (RFC 8949). Parent's `/decrypt` handler
-# branches on these headers — sending CBOR + asking for CBOR is the
-# new fast path; JSON stays available for backward compat.
+# is CBOR-only; the API is the only client.
 _CBOR_CONTENT_TYPE = "application/cbor"
 
 __all__ = [
@@ -247,6 +246,9 @@ def decrypt_vault(
         logger.error("Encryption suite not found in vault", key=key)
         raise exceptions.InternalServerError("Encryption suite not found in vault")
 
+    # `_v` is informational here — the actual v=1/v=2 discriminator is
+    # the DynamoDB type of each per-field value (String for legacy hex,
+    # Binary for current). We still log it for forensic correlation.
     encoding_version: Optional[int] = item.get(constants.ATTR_VERSION)
 
     # Normalize every per-field value to a typed `{encapped_key,
@@ -254,8 +256,8 @@ def decrypt_vault(
     # DynamoDB. v=1 records (legacy hex) carry `encap_hex#ct_hex`
     # strings; v=2 records (current binary default) carry `encap ||
     # ciphertext` concatenated bytes, split using the suite's
-    # encapsulated-key length. The parent receives the same typed shape
-    # either way, so the `encoding` selector is gone from the wire.
+    # encapsulated-key length. The parent receives the same typed
+    # shape either way.
     suite_id_bytes = bytes(hpke_suite_id)
     encap_size = utils.hpke_encap_key_size(suite_id_bytes)
 
