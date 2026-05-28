@@ -32,7 +32,6 @@ inclusion: always
 - `expressions.rs` - CEL expression execution
 - `functions.rs` - CEL custom functions
 - `models.rs` - Request/response types (sync with `api/src/app/models.py`)
-- `protocol.rs` - Vsock message protocol (sync with `parent/src/protocol.rs`)
 
 ### Parent (`parent/src/`)
 - `main.rs` - Application entry point
@@ -40,7 +39,7 @@ inclusion: always
 - `routes.rs` - HTTP route handlers
 - `enclaves.rs` - Enclave lifecycle management
 - `imds.rs` - EC2 instance metadata client
-- `protocol.rs` - Vsock communication (sync with `enclave/src/protocol.rs`)
+- `wire_encoding.rs` - Decodes API request fields into binary wire types for the enclave
 
 ## Infrastructure Templates
 
@@ -70,5 +69,5 @@ When modifying these areas, update both sides:
 |-------------|-----------------|
 | Encryption/Decryption | `api/.../encryptors.py` ↔ `enclave/src/hpke.rs` |
 | Data Models | `api/.../models.py` ↔ `enclave/src/models.rs` |
-| Vsock Protocol | `parent/src/protocol.rs` ↔ `enclave/src/protocol.rs` |
+| Vsock Protocol | `vault-protocol/src/lib.rs` (shared crate) |
 | CEL Functions | `enclave/src/expressions.rs` + `enclave/src/functions.rs` |

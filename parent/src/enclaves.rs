@@ -17,8 +17,8 @@
 //!
 //! # Communication
 //!
-//! The parent communicates with enclaves over vsock using a length-prefixed
-//! JSON protocol. See [`crate::protocol`] for wire format details.
+//! The parent communicates with enclaves over vsock using a versioned,
+//! length-framed CBOR protocol. See [`vault_protocol`] for wire format details.
 //!
 //! [`ENCLAVE_PREFIX`]: crate::constants::ENCLAVE_PREFIX
 //! [`MAX_ENCLAVES_PER_INSTANCE`]: crate::constants::MAX_ENCLAVES_PER_INSTANCE
@@ -194,8 +194,8 @@ impl Enclaves {
     ///
     /// This is a blocking operation that:
     /// 1. Connects to the enclave via vsock
-    /// 2. Serializes and sends the request as JSON
-    /// 3. Receives and deserializes the response
+    /// 2. Serializes and sends the request as a CBOR frame
+    /// 3. Receives and deserializes the CBOR response
     ///
     /// # Arguments
     ///
@@ -208,7 +208,7 @@ impl Enclaves {
     /// Returns an error if:
     /// - vsock connection fails
     /// - Message send/receive fails
-    /// - JSON serialization/deserialization fails
+    /// - CBOR serialization/deserialization fails
     ///
     /// # Note
     ///
