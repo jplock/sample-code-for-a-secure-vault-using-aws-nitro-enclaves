@@ -6,6 +6,17 @@ members = [
 ]
 resolver = "2"
 
+# Fields shared by every member crate. Each crate's manifest opts in
+# via `field.workspace = true` so values can't drift per-crate. The
+# `authors` field is intentionally NOT lifted: vault-protocol was
+# authored after the move from Amazon and uses a Smoke Turner address,
+# while enclave/parent stay on the original Amazon attribution.
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT-0"
+publish = false
+
 [profile.release]
 strip = true      # Automatically strip symbols from the binary
 lto = true        # Enable full link time optimization for better size reduction

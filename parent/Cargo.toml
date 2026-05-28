@@ -3,10 +3,10 @@ name = "parent-vault"
 version = "0.1.0"
 authors = ["Justin Plock <jplock@amazon.com>"]
 description = "Parent instance application for AWS Nitro Enclaves Vault"
-edition = "2024"
-rust-version = "1.95"
-publish = false
-license = "MIT-0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 default-run = "parent-vault"
 
 [lib]
