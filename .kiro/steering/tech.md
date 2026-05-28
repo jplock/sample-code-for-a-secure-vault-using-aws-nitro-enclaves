@@ -23,7 +23,7 @@ Use these crates for the specified purposes:
 | Crypto | aws-lc-rs, rustls | Prefer over OpenSSL |
 | AWS SDK | aws-config, aws-credential-types | |
 | Enclave Comms | vsock | Parent ↔ Enclave |
-| Expressions | cel-interpreter | CEL evaluation |
+| Expressions | cel | CEL evaluation |
 | CLI | clap | Command-line parsing |
 | Errors | anyhow (apps), thiserror (libs) | |
 | Memory | mimalloc | Enclave only (musl target) |
