@@ -64,8 +64,7 @@ impl SecureHpkePrivateKey {
 /// # Arguments
 ///
 /// * `credential` - AWS credentials for KMS access
-/// * `ciphertext` - Raw KMS ciphertext (no base64 envelope; the parent
-///   strips that at the API boundary before forwarding)
+/// * `ciphertext` - Raw KMS ciphertext bytes forwarded from the parent
 /// * `region` - AWS region where the KMS key resides
 fn call_kms_decrypt(credential: &Credential, ciphertext: &[u8], region: &str) -> Result<Vec<u8>> {
     aws_ne::kms_decrypt(
@@ -105,8 +104,8 @@ pub fn get_secret_key(
     payload: &EnclaveRequest,
 ) -> Result<SecureHpkePrivateKey> {
     // Call KMS decrypt via FFI wrapper — returns plaintext bytes directly.
-    // The encrypted blob arrives as raw bytes; the parent strips the
-    // API-side base64 envelope at the HTTPS boundary.
+    // The encrypted blob arrives as raw bytes (the API sends CBOR with
+    // native byte strings, so no base64 envelope is involved).
     let mut plaintext_sk = call_kms_decrypt(
         &payload.credential,
         &payload.request.encrypted_private_key,

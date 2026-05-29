@@ -127,10 +127,9 @@ impl Suite {
     }
 }
 
-/// One HPKE-encrypted per-field value. Both halves are raw bytes; any
-/// hex/base64 transport encoding is the parent's responsibility on the
-/// API ↔ parent boundary and is unwound before the value reaches this
-/// crate.
+/// One HPKE-encrypted per-field value. Both halves are raw bytes; the
+/// API sends them as CBOR `bstr` values so they arrive here without any
+/// hex/base64 encoding.
 ///
 /// `serde_bytes` is used so the CBOR wire encoding is a compact byte
 /// string (`bstr`, major type 2) rather than the default array of
