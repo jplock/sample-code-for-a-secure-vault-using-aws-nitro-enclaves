@@ -103,16 +103,15 @@ List running Nitro Enclaves.
 
 Decrypt vault fields using a Nitro Enclave.
 
-**Request Body:**
-```json
+**Request Body** (`Content-Type: application/cbor`):
+```
 {
-    "vault_id": "v_...",
-    "region": "us-east-1",
-    "fields": {"field_name": "encrypted_value"},
-    "suite_id": "base64_encoded_suite_id",
-    "encrypted_private_key": "base64_encoded_key",
-    "expressions": {"field_name": "CEL expression"},
-    "encoding": "utf-8"
+    "vault_id": string,
+    "region": string,
+    "fields": {"field_name": {"encapped_key": bytes, "ciphertext": bytes}},
+    "suite_id": bytes (10 bytes, RFC 9180 HPKE suite identifier),
+    "encrypted_private_key": bytes (KMS ciphertext),
+    "expressions": {"field_name": "CEL expression"}  // optional
 }
 ```
 
