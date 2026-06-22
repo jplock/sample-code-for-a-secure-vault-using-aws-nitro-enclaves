@@ -10,9 +10,10 @@
 //!
 //! The server includes the following middleware (applied in order):
 //!
-//! 1. **Rate Limiting** - 100 requests/second per IP via tower-governor
-//! 2. **Timeout** - 30 second request timeout
-//! 3. **Body Limit** - 1 MB maximum request body size
+//! 1. **Timeout** - 30 second request timeout
+//! 2. **Body Limit** - 1 MB maximum request body size
+//!
+//! Request throttling is handled upstream at API Gateway, not in this tier.
 //!
 //! # Graceful Shutdown
 //!

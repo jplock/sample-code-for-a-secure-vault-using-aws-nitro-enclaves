@@ -16,7 +16,6 @@ This component runs on the EC2 instance and provides:
 ```
                     +----------------+
     HTTP Request -> | Axum Router    |
-                    | - Rate Limit   |
                     | - Timeout      |
                     | - Body Limit   |
                     +-------+--------+
@@ -127,9 +126,10 @@ Decrypt vault fields using a Nitro Enclave.
 
 | Middleware | Configuration |
 |------------|---------------|
-| Rate Limiting | 100 requests/second per IP |
 | Request Timeout | 30 seconds |
 | Body Size Limit | 1 MB |
+
+Request throttling is handled upstream at API Gateway, not in this tier.
 
 ## Testing
 
@@ -158,4 +158,4 @@ cargo doc -p parent-vault --open
 - **Credential Protection**: Sensitive data is zeroized on drop via `zeroize`
 - **Debug Redaction**: Credential debug output shows `[REDACTED]`
 - **Request Validation**: Strict size limits on all fields
-- **Rate Limiting**: Prevents denial of service attacks
+- **Resource Limits**: Request body size limit and request timeout guard against resource exhaustion

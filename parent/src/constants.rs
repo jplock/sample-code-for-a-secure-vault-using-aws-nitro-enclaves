@@ -12,6 +12,14 @@ use std::time::Duration;
 /// Only enclaves with names starting with this prefix are managed by this application.
 pub const ENCLAVE_PREFIX: &str = "enclave-vault";
 
+/// Enclave state (as reported by `nitro-cli describe-enclaves`) indicating an
+/// enclave is fully running and ready to accept vsock connections.
+///
+/// Only enclaves in this state are selected for decrypt requests; a
+/// `TERMINATING` (or otherwise non-running) enclave can still appear in the
+/// `describe-enclaves` output but would fail the vsock connection.
+pub const ENCLAVE_STATE_RUNNING: &str = "RUNNING";
+
 /// The vsock port number that enclaves listen on for incoming requests.
 pub const ENCLAVE_PORT: u32 = 5050;
 
@@ -36,6 +44,15 @@ pub const RUN_ENCLAVE_MEMORY_SIZE: &str = "512";
 /// new ones if needed to maintain [`MAX_ENCLAVES_PER_INSTANCE`].
 pub const REFRESH_ENCLAVES_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Maximum time to wait for the initial enclave refresh during startup.
+///
+/// The parent performs one synchronous refresh before serving traffic so it does
+/// not accept `/decrypt` requests before any enclave is available. This timeout
+/// bounds that wait so a hung `nitro-cli` cannot block startup indefinitely; if
+/// it elapses the server starts anyway and the background refresh loop keeps
+/// retrying.
+pub const INITIAL_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Time-to-live for IMDS session tokens.
 ///
 /// The parent uses these tokens to authenticate with the EC2 Instance Metadata
@@ -47,6 +64,16 @@ pub const IMDS_TOKEN_TTL: Duration = Duration::from_secs(300);
 /// Credentials are refreshed this many seconds before they actually expire
 /// to ensure uninterrupted access to AWS services.
 pub const CREDENTIAL_REFRESH_BUFFER: Duration = Duration::from_secs(60);
+
+/// Minimum remaining lifetime required to reuse cached credentials when an IMDS
+/// refresh fails.
+///
+/// During the [`CREDENTIAL_REFRESH_BUFFER`] window the cached credentials are
+/// still valid even though a proactive refresh is due. If that refresh fails
+/// (transient IMDS outage), the parent falls back to the cached credentials —
+/// but only while they retain at least this much lifetime, so an in-flight KMS
+/// call (bounded by the ~20s vsock I/O timeout) cannot outlive them.
+pub const CREDENTIAL_FALLBACK_MIN_REMAINING: Duration = Duration::from_secs(25);
 
 // vsock message-size cap lives in `vault_protocol::MAX_FRAME_BODY_SIZE`,
 // shared with the enclave so both ends agree on the bound.
