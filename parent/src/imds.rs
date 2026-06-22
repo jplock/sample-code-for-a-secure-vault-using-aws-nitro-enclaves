@@ -21,7 +21,7 @@
 //! - Token TTL: 5 minutes (configurable via [`IMDS_TOKEN_TTL`](crate::constants::IMDS_TOKEN_TTL))
 //! - Automatic retry on connection timeouts
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use aws_config::imds::client::{Client, ImdsResponseRetryClassifier};
 use aws_config::imds::credentials::ImdsCredentialsProvider;
@@ -105,10 +105,25 @@ impl CredentialCache {
     /// - It has no expiry time (permanent credentials), OR
     /// - Current time + refresh buffer < expiry time
     fn is_valid(&self, cached: &CachedCredential) -> bool {
+        self.has_remaining_lifetime(cached, constants::CREDENTIAL_REFRESH_BUFFER)
+    }
+
+    /// Checks whether cached credentials still retain at least
+    /// [`CREDENTIAL_FALLBACK_MIN_REMAINING`](constants::CREDENTIAL_FALLBACK_MIN_REMAINING)
+    /// of lifetime.
+    ///
+    /// Used as a fallback gate when an IMDS refresh fails during the pre-expiry
+    /// refresh buffer: the cached credentials are still usable, but only if they
+    /// will outlast an in-flight downstream (KMS) call.
+    fn has_min_lifetime(&self, cached: &CachedCredential) -> bool {
+        self.has_remaining_lifetime(cached, constants::CREDENTIAL_FALLBACK_MIN_REMAINING)
+    }
+
+    /// Returns true if `now + buffer < expires_at` (or the credential never expires).
+    fn has_remaining_lifetime(&self, cached: &CachedCredential, buffer: Duration) -> bool {
         match cached.expires_at {
             Some(expires_at) => {
                 let now = SystemTime::now();
-                let buffer = constants::CREDENTIAL_REFRESH_BUFFER;
                 // Valid if now + buffer < expires_at
                 now.checked_add(buffer)
                     .map(|threshold| threshold < expires_at)
@@ -134,13 +149,27 @@ impl CredentialCache {
             return Ok(cached.credential.clone());
         }
 
-        // Fetch fresh credentials from IMDS
-        let (credential, expires_at) = load_credentials_with_expiry(self.profile.clone())
-            .await
-            .map_err(|e| {
-                tracing::error!("[parent] failed to load credentials from IMDS: {:?}", e);
-                e
-            })?;
+        // Fetch fresh credentials from IMDS. If the fetch fails (transient IMDS
+        // outage during the pre-expiry refresh buffer), fall back to the cached
+        // credentials as long as they still have enough lifetime to outlast an
+        // in-flight KMS call — this avoids an avoidable outage where usable
+        // credentials are discarded purely because a proactive refresh failed.
+        let (credential, expires_at) =
+            match load_credentials_with_expiry(self.profile.clone()).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("[parent] failed to load credentials from IMDS: {:?}", e);
+                    if let Some(ref cached) = *cache
+                        && self.has_min_lifetime(cached)
+                    {
+                        tracing::warn!(
+                            "[parent] IMDS refresh failed; serving still-valid cached credentials"
+                        );
+                        return Ok(cached.credential.clone());
+                    }
+                    return Err(e);
+                }
+            };
 
         tracing::debug!(
             "[parent] refreshed IMDS credentials, expires_at: {:?}",
@@ -248,6 +277,41 @@ mod tests {
             expires_at: Some(SystemTime::now() - Duration::from_secs(1)), // Already expired
         };
         assert!(!cache.is_valid(&cached));
+    }
+
+    #[tokio::test]
+    async fn test_has_min_lifetime_above_threshold() {
+        let cache = CredentialCache::new(None);
+        let cached = CachedCredential {
+            credential: Credentials::new("AKIA123", "secret", Some("token".into()), None, "test"),
+            // Within the 60s refresh buffer but still well above the 25s fallback
+            // minimum, so it is usable as a fallback on IMDS failure.
+            expires_at: Some(SystemTime::now() + Duration::from_secs(40)),
+        };
+        assert!(cache.has_min_lifetime(&cached));
+        // Still considered "needs refresh" because it's inside the refresh buffer.
+        assert!(!cache.is_valid(&cached));
+    }
+
+    #[tokio::test]
+    async fn test_has_min_lifetime_below_threshold() {
+        let cache = CredentialCache::new(None);
+        let cached = CachedCredential {
+            credential: Credentials::new("AKIA123", "secret", Some("token".into()), None, "test"),
+            // Below the 25s fallback minimum: not safe to reuse.
+            expires_at: Some(SystemTime::now() + Duration::from_secs(10)),
+        };
+        assert!(!cache.has_min_lifetime(&cached));
+    }
+
+    #[tokio::test]
+    async fn test_has_min_lifetime_no_expiry() {
+        let cache = CredentialCache::new(None);
+        let cached = CachedCredential {
+            credential: Credentials::new("AKIA123", "secret", Some("token".into()), None, "test"),
+            expires_at: None,
+        };
+        assert!(cache.has_min_lifetime(&cached));
     }
 
     #[tokio::test]

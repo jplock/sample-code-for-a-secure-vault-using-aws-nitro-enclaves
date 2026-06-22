@@ -20,14 +20,14 @@
 //!
 //! The parent tier runs on an EC2 instance with Nitro Enclave support and provides:
 //!
-//! - **HTTP API**: Axum-based server with rate limiting, timeouts, and body limits
+//! - **HTTP API**: Axum-based server with request timeouts and body limits
 //! - **Credential Management**: Caches IAM credentials from IMDS with automatic refresh
 //! - **Enclave Management**: Discovers and launches Nitro Enclaves via `nitro-cli`
 //! - **vsock Communication**: Versioned, length-framed CBOR protocol for enclave requests (see `vault_protocol`)
 //!
 //! ## Modules
 //!
-//! - [`application`]: HTTP server setup with Axum, rate limiting, and timeouts
+//! - [`application`]: HTTP server setup with Axum, request timeouts, and body limits
 //! - [`configuration`]: CLI argument parsing with clap
 //! - [`constants`]: Configuration constants for the application
 //! - [`enclaves`]: Nitro Enclave management and vsock communication
@@ -54,8 +54,8 @@
 //! - Credentials are cached with automatic refresh 60 seconds before expiry
 //! - All sensitive credential data is zeroized on drop
 //! - Request validation enforces strict size limits to prevent abuse
-//! - Rate limiting (100 req/s) protects against denial of service
-//! - 30-second request timeout prevents resource exhaustion
+//! - 1 MB request body limit and a 30-second request timeout prevent resource exhaustion
+//! - Request throttling is enforced upstream at API Gateway
 
 pub mod application;
 pub mod cbor;

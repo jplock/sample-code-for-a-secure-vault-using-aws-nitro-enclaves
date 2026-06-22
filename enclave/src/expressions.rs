@@ -188,8 +188,11 @@ pub fn execute_expressions(
             }
         };
 
-        context.add_variable_from_value(field, value.clone());
-
+        // Do NOT re-inject the computed result back into the context. Every
+        // expression must evaluate against the original decrypted attributes
+        // only (the documented contract). Re-injecting results would let later
+        // expressions observe earlier ones, making output depend on the
+        // (non-deterministic) HashMap iteration order across enclave restarts.
         let result: Value = value
             .json()
             .map_err(|err| anyhow!("Unable to serialize JSON value: {err}"))?;
@@ -501,6 +504,23 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_expressions_rejects_oversized_expression() {
+        // Regression for issue #33: an expression over MAX_EXPRESSION_LENGTH must
+        // return Err (which the request handler now surfaces to the caller as an
+        // error) rather than being silently dropped.
+        let oversized = "a".repeat(MAX_EXPRESSION_LENGTH + 1);
+        let expressions: HashMap<String, String> =
+            HashMap::from([("first_name".to_string(), oversized)]);
+        let fields: HashMap<String, Value> =
+            HashMap::from([("first_name".to_string(), "Bob".into())]);
+
+        let result = execute_expressions(&fields, &expressions);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("exceeds maximum length"));
+    }
+
+    #[test]
     fn test_get_or_compile_returns_same_arc_on_hit() {
         // Same input string twice should return the same cached Arc.
         let expr = "test_unique_expression_for_cache_hit.to_uppercase()";
@@ -561,6 +581,40 @@ mod tests {
         let (actual, errors) = execute_expressions(&fields, &expressions).unwrap();
         assert_eq!(actual, expected);
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_expressions_evaluate_against_original_fields_only() {
+        // Regression for issue #32: each expression must see the ORIGINAL
+        // decrypted value, never another expression's result. Here one
+        // expression transforms `first_name` in place while another hashes it;
+        // the hash must always be of the original "Bob", independent of the
+        // (non-deterministic) HashMap iteration order.
+        let expressions: HashMap<String, String> = HashMap::from([
+            (
+                "first_name".to_string(),
+                "first_name.to_uppercase()".to_string(),
+            ),
+            (
+                "original_hash".to_string(),
+                "first_name.sha256()".to_string(),
+            ),
+        ]);
+
+        let fields: HashMap<String, Value> =
+            HashMap::from([("first_name".to_string(), "Bob".into())]);
+
+        let (actual, errors) = execute_expressions(&fields, &expressions).unwrap();
+        assert!(errors.is_empty());
+        // In-place transform applied to the field.
+        assert_eq!(actual.get("first_name"), Some(&Value::String("BOB".into())));
+        // Hash is of the ORIGINAL "Bob", not the uppercased "BOB".
+        assert_eq!(
+            actual.get("original_hash"),
+            Some(&Value::String(
+                "cd9fb1e148ccd8442e5aa74904cc73bf6fb54d1d54d333bd596aa9bb4bb4e961".into()
+            ))
+        );
     }
 
     #[test]

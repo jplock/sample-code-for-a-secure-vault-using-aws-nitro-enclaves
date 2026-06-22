@@ -30,11 +30,24 @@ use vault_protocol::{EnclaveRequest, EnclaveResponse, recv_response, send_reques
 use vsock::{VsockAddr, VsockStream};
 
 use crate::constants::{
-    self, ENCLAVE_PREFIX, MAX_ENCLAVES_PER_INSTANCE, RUN_ENCLAVE_CPU_COUNT, RUN_ENCLAVE_EIF_PATH,
-    RUN_ENCLAVE_MEMORY_SIZE,
+    self, ENCLAVE_PREFIX, ENCLAVE_STATE_RUNNING, MAX_ENCLAVES_PER_INSTANCE, RUN_ENCLAVE_CPU_COUNT,
+    RUN_ENCLAVE_EIF_PATH, RUN_ENCLAVE_MEMORY_SIZE,
 };
 use crate::errors::AppError;
 use crate::models::{EnclaveDescribeInfo, EnclaveRunInfo};
+
+/// Returns `true` if an enclave should be selected for decrypt requests.
+///
+/// An enclave is selectable only when its name matches [`ENCLAVE_PREFIX`] **and**
+/// it is in the [`ENCLAVE_STATE_RUNNING`] state. `nitro-cli describe-enclaves`
+/// reports `TERMINATING` enclaves until termination completes; selecting one
+/// would fail the vsock connection, so they are excluded here.
+fn is_runnable_enclave(e: &EnclaveDescribeInfo) -> bool {
+    e.enclave_name
+        .as_ref()
+        .is_some_and(|name| name.starts_with(ENCLAVE_PREFIX))
+        && e.state == ENCLAVE_STATE_RUNNING
+}
 
 /// Read/write timeout applied to every [`VsockStream`] used to talk to an enclave.
 ///
@@ -111,7 +124,8 @@ impl Enclaves {
     ///    launched enclaves are immediately visible (otherwise the stored list
     ///    reflects the pre-launch state and replacement enclaves are invisible
     ///    until the next refresh tick)
-    /// 4. Filters and stores only enclaves matching [`ENCLAVE_PREFIX`]
+    /// 4. Filters and stores only enclaves matching [`ENCLAVE_PREFIX`] that are
+    ///    in the [`ENCLAVE_STATE_RUNNING`] state
     ///
     /// # Arguments
     ///
@@ -146,14 +160,10 @@ impl Enclaves {
             tracing::warn!("[parent] skipping launching enclaves");
         }
 
-        // Filter and store only vault enclaves
+        // Filter and store only running vault enclaves
         let mut enclaves_writer = self.enclaves.write().await;
         enclaves_writer.clear();
-        enclaves_writer.extend(enclaves.into_iter().filter(|e| {
-            e.enclave_name
-                .as_ref()
-                .is_some_and(|name| name.starts_with(ENCLAVE_PREFIX))
-        }));
+        enclaves_writer.extend(enclaves.into_iter().filter(is_runnable_enclave));
 
         Ok(())
     }
@@ -288,6 +298,50 @@ mod tests {
 
         let non_matching_name = "other-enclave";
         assert!(!non_matching_name.starts_with(ENCLAVE_PREFIX));
+    }
+
+    /// Builds an `EnclaveDescribeInfo` for filter tests with the given name and state.
+    fn describe_info(name: &str, state: &str) -> EnclaveDescribeInfo {
+        EnclaveDescribeInfo {
+            enclave_name: Some(name.to_string()),
+            enclave_id: "i-abc123-enc1".to_string(),
+            process_id: 1234,
+            enclave_cid: 16,
+            cpu_count: 1,
+            cpu_ids: vec![0],
+            memory_mib: 512,
+            state: state.to_string(),
+            flags: "NONE".to_string(),
+            build_info: None,
+            img_name: None,
+            img_version: None,
+        }
+    }
+
+    #[test]
+    fn test_is_runnable_enclave_state_and_prefix() {
+        // Matching prefix + RUNNING => selectable
+        assert!(is_runnable_enclave(&describe_info(
+            &format!("{ENCLAVE_PREFIX}-1"),
+            ENCLAVE_STATE_RUNNING
+        )));
+
+        // Matching prefix but TERMINATING => excluded (the bug from issue #36)
+        assert!(!is_runnable_enclave(&describe_info(
+            &format!("{ENCLAVE_PREFIX}-2"),
+            "TERMINATING"
+        )));
+
+        // Running but wrong name prefix => excluded
+        assert!(!is_runnable_enclave(&describe_info(
+            "other-enclave",
+            ENCLAVE_STATE_RUNNING
+        )));
+
+        // No name => excluded
+        let mut nameless = describe_info("ignored", ENCLAVE_STATE_RUNNING);
+        nameless.enclave_name = None;
+        assert!(!is_runnable_enclave(&nameless));
     }
 
     #[test]

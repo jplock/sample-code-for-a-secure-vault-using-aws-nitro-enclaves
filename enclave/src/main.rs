@@ -80,9 +80,12 @@ fn handle_client<S: Read + Write>(mut stream: S) -> Result<()> {
                     // Only log error details in debug builds
                     #[cfg(debug_assertions)]
                     println!("[enclave debug] expression error: {:?}", err);
-                    #[cfg(not(debug_assertions))]
-                    let _ = err;
-                    (decrypted_fields, Vec::new())
+                    // Preserve the raw decrypted fields, but surface the failure
+                    // so callers can tell their transformations were not applied
+                    // (e.g. an expression rejected for exceeding the max length).
+                    // The error is sanitized downstream before crossing the vsock
+                    // boundary.
+                    (decrypted_fields, vec![err])
                 }
             }
         }

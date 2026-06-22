@@ -41,9 +41,35 @@ async fn main() -> Result<(), Error> {
             "[parent] refreshing enclaves every {:#?}",
             constants::REFRESH_ENCLAVES_INTERVAL
         );
+
+        // Perform one synchronous refresh before serving traffic so the HTTP
+        // server does not accept `/decrypt` requests during the cold-start
+        // window where the enclave list is still empty. Bounded by a timeout so
+        // a hung `nitro-cli` cannot block startup forever — on failure/timeout
+        // we log and start anyway, letting the background loop recover.
+        match tokio::time::timeout(
+            constants::INITIAL_REFRESH_TIMEOUT,
+            enclaves.refresh(options.skip_run_enclaves),
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::info!("[parent] initial enclave refresh complete"),
+            Ok(Err(e)) => {
+                tracing::error!("[parent] initial enclave refresh failed: {:?}", e)
+            }
+            Err(_) => tracing::error!(
+                "[parent] initial enclave refresh timed out after {:#?}",
+                constants::INITIAL_REFRESH_TIMEOUT
+            ),
+        }
+
         let enclaves_mut = enclaves.clone();
         tokio::spawn(async move {
             loop {
+                // Sleep first: the initial refresh above already ran, so waiting
+                // one interval before the next refresh avoids racing it (which
+                // could otherwise double-launch enclaves).
+                tokio::time::sleep(constants::REFRESH_ENCLAVES_INTERVAL).await;
                 if let Err(e) = enclaves_mut.refresh(options.skip_run_enclaves).await {
                     tracing::error!("[parent] failed to refresh enclaves: {:?}", e);
                 }
@@ -51,7 +77,6 @@ async fn main() -> Result<(), Error> {
                     "[parent] refreshed enclaves, sleeping for {:#?}",
                     constants::REFRESH_ENCLAVES_INTERVAL
                 );
-                tokio::time::sleep(constants::REFRESH_ENCLAVES_INTERVAL).await;
             }
         });
     } else {
