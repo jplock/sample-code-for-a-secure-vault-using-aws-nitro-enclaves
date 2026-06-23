@@ -114,13 +114,18 @@ Decrypt vault fields using a Nitro Enclave.
 }
 ```
 
-**Response:**
+**Success Response (200):**
 ```json
 {
     "fields": {"field_name": "decrypted_value"},
     "errors": null
 }
 ```
+
+**Error Responses:**
+- `400 Bad Request` — validation error (invalid region, malformed request)
+- `404 Not Found` — no enclaves available to handle the request
+- `500 Internal Server Error` — total decrypt failure (e.g., KMS access denied before any field was attempted)
 
 ## Middleware Configuration
 
