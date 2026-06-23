@@ -88,6 +88,8 @@ The Parent is the only thing that can talk to the Enclave (over vsock). The Encl
 5. Enclave calls KMS to decrypt the symmetric key, then uses HPKE (RFC 9180: P-384, HKDF-SHA384, AES-256-GCM) to decrypt each attribute (parallelized with `rayon`)
 6. CEL expressions optionally transform decrypted data before it's returned
 
+If the enclave cannot process the request at all (e.g., KMS failure before any field was attempted), it returns `fields: None`, which the parent maps to HTTP 500 (`DecryptError`) rather than a 200 with an empty map.
+
 ## Cross-Component Sync Points
 
 These pairs MUST be updated together — they implement opposite sides of the same wire format:

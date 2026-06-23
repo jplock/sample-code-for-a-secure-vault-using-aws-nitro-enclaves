@@ -223,11 +223,16 @@ pub struct EnclaveRequest {
 /// `fields` carries decrypted (and possibly CEL-transformed) per-field
 /// values. `errors` carries sanitized per-field decryption / expression
 /// failures; see `enclave/src/utils.rs::sanitize_error_message`.
+///
+/// The parent maps `fields: None` to `DecryptError` (HTTP 500) rather than
+/// a 200 response with an empty map, so total failures are distinguishable
+/// from partial failures at the HTTP layer.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EnclaveResponse {
     /// `Some(map)` for successful (possibly partial) decrypt; `None` only
     /// when the enclave couldn't process the request at all (parse error,
-    /// KMS failure before any field was attempted).
+    /// KMS failure before any field was attempted). The parent maps `None`
+    /// to HTTP 500 (`DecryptError`), not an empty 200 response.
     pub fields: Option<HashMap<String, Value>>,
     /// Sanitized per-field decryption / expression failures. `None`
     /// means no errors at all (vs `Some(empty)` which never occurs).
