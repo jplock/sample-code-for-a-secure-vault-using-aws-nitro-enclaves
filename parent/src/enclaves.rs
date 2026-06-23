@@ -132,12 +132,18 @@ impl Enclaves {
     /// This method:
     /// 1. Calls `nitro-cli describe-enclaves` to get current enclaves
     /// 2. Launches new enclaves if needed (unless `skip_run_enclaves` is true)
-    /// 3. Re-queries `nitro-cli describe-enclaves` after launching so freshly
-    ///    launched enclaves are immediately visible (otherwise the stored list
-    ///    reflects the pre-launch state and replacement enclaves are invisible
-    ///    until the next refresh tick)
+    /// 3. Re-queries `nitro-cli describe-enclaves` after a successful launch so
+    ///    freshly launched enclaves are immediately visible (otherwise the
+    ///    stored list reflects the pre-launch state and replacement enclaves
+    ///    are invisible until the next refresh tick)
     /// 4. Filters and stores only enclaves matching [`ENCLAVE_PREFIX`] that are
     ///    in the [`ENCLAVE_STATE_RUNNING`] state
+    ///
+    /// The routing list (step 4) is always refreshed from the latest describe
+    /// output whenever the initial describe succeeds — even if a replacement
+    /// launch fails — so a crashed (`TERMINATING`) enclave is dropped from
+    /// rotation rather than lingering until a future launch succeeds. A launch
+    /// failure is still surfaced to the caller after the list is updated.
     ///
     /// # Arguments
     ///
@@ -154,27 +160,42 @@ impl Enclaves {
         // Get current enclave list from nitro-cli
         let mut enclaves = self.describe_enclaves().await?;
 
-        // Launch additional enclaves if needed
+        // Launch additional enclaves if needed. A launch failure is recorded
+        // but does not short-circuit the routing-list update below, so a
+        // crashed enclave is still dropped from rotation this cycle.
+        let mut launch_outcome = Ok(());
         if !skip_run_enclaves {
             let delta = enclaves_to_launch(&enclaves);
             if delta > 0 {
                 tracing::debug!("[parent] launching {} enclaves", delta);
                 for _ in 0..delta {
-                    self.run_enclave().await?;
+                    if let Err(e) = self.run_enclave().await {
+                        tracing::error!("[parent] failed to launch enclave: {:?}", e);
+                        launch_outcome = Err(e);
+                        break;
+                    }
                 }
-                // Re-query so freshly launched enclaves are reflected in the stored list.
-                enclaves = self.describe_enclaves().await?;
+                // Re-query only after a fully successful launch so freshly
+                // launched enclaves are reflected. On failure we keep the
+                // pre-launch snapshot, which still carries enough state for the
+                // filter below to drop the crashed enclave.
+                if launch_outcome.is_ok() {
+                    enclaves = self.describe_enclaves().await?;
+                }
             }
         } else {
             tracing::warn!("[parent] skipping launching enclaves");
         }
 
-        // Filter and store only running vault enclaves
-        let mut enclaves_writer = self.enclaves.write().await;
-        enclaves_writer.clear();
-        enclaves_writer.extend(enclaves.into_iter().filter(is_runnable_enclave));
+        // Filter and store only running vault enclaves. Runs regardless of the
+        // launch outcome so TERMINATING enclaves leave the routing rotation.
+        {
+            let mut enclaves_writer = self.enclaves.write().await;
+            enclaves_writer.clear();
+            enclaves_writer.extend(enclaves.into_iter().filter(is_runnable_enclave));
+        }
 
-        Ok(())
+        launch_outcome
     }
 
     /// Launches a new Nitro Enclave.
