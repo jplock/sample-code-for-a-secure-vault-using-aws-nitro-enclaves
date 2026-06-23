@@ -49,6 +49,18 @@ fn is_runnable_enclave(e: &EnclaveDescribeInfo) -> bool {
         && e.state == ENCLAVE_STATE_RUNNING
 }
 
+/// Number of new enclaves to launch to reach [`MAX_ENCLAVES_PER_INSTANCE`].
+///
+/// Counts only *runnable* (RUNNING + matching prefix) enclaves so that
+/// `TERMINATING` enclaves left behind by a crash do not count toward capacity —
+/// otherwise a crashed enclave suppresses its own replacement and leaves the
+/// instance under-provisioned. `saturating_sub` floors at zero if more than
+/// `MAX_ENCLAVES_PER_INSTANCE` are somehow already running.
+fn enclaves_to_launch(enclaves: &[EnclaveDescribeInfo]) -> usize {
+    let running = enclaves.iter().filter(|e| is_runnable_enclave(e)).count();
+    MAX_ENCLAVES_PER_INSTANCE.saturating_sub(running)
+}
+
 /// Read/write timeout applied to every [`VsockStream`] used to talk to an enclave.
 ///
 /// `tokio::task::spawn_blocking` threads cannot be aborted, so the surrounding HTTP request
@@ -144,10 +156,7 @@ impl Enclaves {
 
         // Launch additional enclaves if needed
         if !skip_run_enclaves {
-            // saturating_sub: if somehow more enclaves are already running than
-            // MAX_ENCLAVES_PER_INSTANCE (shouldn't happen, but the lint won't
-            // assume that), we just launch zero.
-            let delta = MAX_ENCLAVES_PER_INSTANCE.saturating_sub(enclaves.len());
+            let delta = enclaves_to_launch(&enclaves);
             if delta > 0 {
                 tracing::debug!("[parent] launching {} enclaves", delta);
                 for _ in 0..delta {
@@ -342,6 +351,39 @@ mod tests {
         let mut nameless = describe_info("ignored", ENCLAVE_STATE_RUNNING);
         nameless.enclave_name = None;
         assert!(!is_runnable_enclave(&nameless));
+    }
+
+    #[test]
+    fn test_enclaves_to_launch_excludes_terminating() {
+        // The bug (#40): one RUNNING + one TERMINATING vault enclave fills the
+        // raw count to MAX, but only one is routable, so a replacement must
+        // launch. The old `enclaves.len()` logic returned 0 here.
+        let enclaves = vec![
+            describe_info(&format!("{ENCLAVE_PREFIX}-1"), ENCLAVE_STATE_RUNNING),
+            describe_info(&format!("{ENCLAVE_PREFIX}-2"), "TERMINATING"),
+        ];
+        assert_eq!(enclaves_to_launch(&enclaves), 1);
+    }
+
+    #[test]
+    fn test_enclaves_to_launch_at_capacity() {
+        let enclaves = vec![
+            describe_info(&format!("{ENCLAVE_PREFIX}-1"), ENCLAVE_STATE_RUNNING),
+            describe_info(&format!("{ENCLAVE_PREFIX}-2"), ENCLAVE_STATE_RUNNING),
+        ];
+        assert_eq!(enclaves_to_launch(&enclaves), 0);
+    }
+
+    #[test]
+    fn test_enclaves_to_launch_empty() {
+        assert_eq!(enclaves_to_launch(&[]), MAX_ENCLAVES_PER_INSTANCE);
+    }
+
+    #[test]
+    fn test_enclaves_to_launch_ignores_non_vault_enclaves() {
+        // A RUNNING enclave with a different prefix is not part of our pool.
+        let enclaves = vec![describe_info("other-enclave", ENCLAVE_STATE_RUNNING)];
+        assert_eq!(enclaves_to_launch(&enclaves), MAX_ENCLAVES_PER_INSTANCE);
     }
 
     #[test]
