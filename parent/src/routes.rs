@@ -105,6 +105,7 @@ pub async fn run_enclave(
 /// - [`AppError::ValidationError`] — request validation or translation failure
 /// - [`AppError::EnclaveNotFound`] — no enclaves available
 /// - [`AppError::InternalServerError`] — credential or enclave communication failure
+/// - [`AppError::DecryptError`] — enclave signalled a total decrypt failure
 #[tracing::instrument(skip(state, request))]
 pub async fn decrypt(
     State(state): State<Arc<AppState>>,
@@ -177,15 +178,37 @@ pub async fn decrypt(
 
     tracing::debug!("[parent] received response from CID: {:?}", cid);
 
-    // 6. Transform enclave response to parent response format. The
-    // enclave returns a HashMap (no ordering guarantee); the API
-    // returns a BTreeMap so output is deterministic for clients.
-    let parent_response = ParentResponse {
-        fields: response.fields.unwrap_or_default().into_iter().collect(),
-        errors: response.errors,
-    };
+    // 6. Transform enclave response to parent response format, surfacing a
+    // total-failure signal as an error rather than an empty 200.
+    let parent_response = build_parent_response(response)?;
 
     Ok(Cbor(parent_response))
+}
+
+/// Transforms an [`EnclaveResponse`] into a [`ParentResponse`].
+///
+/// `fields: None` is the enclave's total-failure signal — it could not process
+/// the request at all (parse error, or KMS failure before any field was
+/// attempted). Surfacing that as [`AppError::DecryptError`] (HTTP 500) keeps the
+/// API from recording a `VaultDecrypt` success on a complete failure.
+/// `fields: Some(map)` is a processed (possibly partial) decrypt and stays a
+/// `200` response — per-field failures ride along in `errors`.
+///
+/// The enclave returns a `HashMap` (no ordering guarantee); the API returns a
+/// `BTreeMap` so output is deterministic for clients.
+fn build_parent_response(response: EnclaveResponse) -> Result<ParentResponse, AppError> {
+    let Some(fields) = response.fields else {
+        tracing::error!(
+            "[parent] enclave signalled total decrypt failure: {:?}",
+            response.errors
+        );
+        return Err(AppError::DecryptError);
+    };
+
+    Ok(ParentResponse {
+        fields: fields.into_iter().collect(),
+        errors: response.errors,
+    })
 }
 
 #[cfg(test)]
@@ -198,6 +221,7 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::StatusCode;
+    use std::collections::HashMap;
 
     // Unit tests for route handlers (testing handler functions directly)
     // Integration tests using TestServer are in tests/http_integration.rs
@@ -221,5 +245,42 @@ mod tests {
         // Should have exactly one key
         assert_eq!(json.as_object().unwrap().len(), 1);
         assert!(json.get("status").is_some());
+    }
+
+    #[test]
+    fn test_build_parent_response_total_failure_is_decrypt_error() {
+        // fields: None is the enclave's total-failure signal (bug #38): it
+        // must surface as DecryptError (HTTP 500), not a flattened empty 200.
+        let response = EnclaveResponse::error_msg("kms access denied".to_string());
+        assert_eq!(
+            build_parent_response(response).unwrap_err(),
+            AppError::DecryptError
+        );
+    }
+
+    #[test]
+    fn test_build_parent_response_success_preserves_fields() {
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), json!("alice"));
+        fields.insert("ssn".to_string(), json!("123-45-6789"));
+        let response = EnclaveResponse::new(fields, None);
+
+        let parent = build_parent_response(response).unwrap();
+        assert_eq!(parent.fields.get("name"), Some(&json!("alice")));
+        assert_eq!(parent.fields.get("ssn"), Some(&json!("123-45-6789")));
+        assert!(parent.errors.is_none());
+    }
+
+    #[test]
+    fn test_build_parent_response_partial_failure_stays_ok() {
+        // The request was processed (fields: Some) but every field failed:
+        // empty map + errors. This is partial failure, not total, so it must
+        // remain an Ok (HTTP 200) response with the errors preserved.
+        let response =
+            EnclaveResponse::new(HashMap::new(), Some(vec!["field x failed".to_string()]));
+
+        let parent = build_parent_response(response).unwrap();
+        assert!(parent.fields.is_empty());
+        assert_eq!(parent.errors, Some(vec!["field x failed".to_string()]));
     }
 }

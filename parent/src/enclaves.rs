@@ -49,6 +49,18 @@ fn is_runnable_enclave(e: &EnclaveDescribeInfo) -> bool {
         && e.state == ENCLAVE_STATE_RUNNING
 }
 
+/// Number of new enclaves to launch to reach [`MAX_ENCLAVES_PER_INSTANCE`].
+///
+/// Counts only *runnable* (RUNNING + matching prefix) enclaves so that
+/// `TERMINATING` enclaves left behind by a crash do not count toward capacity —
+/// otherwise a crashed enclave suppresses its own replacement and leaves the
+/// instance under-provisioned. `saturating_sub` floors at zero if more than
+/// `MAX_ENCLAVES_PER_INSTANCE` are somehow already running.
+fn enclaves_to_launch(enclaves: &[EnclaveDescribeInfo]) -> usize {
+    let running = enclaves.iter().filter(|e| is_runnable_enclave(e)).count();
+    MAX_ENCLAVES_PER_INSTANCE.saturating_sub(running)
+}
+
 /// Read/write timeout applied to every [`VsockStream`] used to talk to an enclave.
 ///
 /// `tokio::task::spawn_blocking` threads cannot be aborted, so the surrounding HTTP request
@@ -120,12 +132,18 @@ impl Enclaves {
     /// This method:
     /// 1. Calls `nitro-cli describe-enclaves` to get current enclaves
     /// 2. Launches new enclaves if needed (unless `skip_run_enclaves` is true)
-    /// 3. Re-queries `nitro-cli describe-enclaves` after launching so freshly
-    ///    launched enclaves are immediately visible (otherwise the stored list
-    ///    reflects the pre-launch state and replacement enclaves are invisible
-    ///    until the next refresh tick)
+    /// 3. Re-queries `nitro-cli describe-enclaves` after a successful launch so
+    ///    freshly launched enclaves are immediately visible (otherwise the
+    ///    stored list reflects the pre-launch state and replacement enclaves
+    ///    are invisible until the next refresh tick)
     /// 4. Filters and stores only enclaves matching [`ENCLAVE_PREFIX`] that are
     ///    in the [`ENCLAVE_STATE_RUNNING`] state
+    ///
+    /// The routing list (step 4) is always refreshed from the latest describe
+    /// output whenever the initial describe succeeds — even if a replacement
+    /// launch fails — so a crashed (`TERMINATING`) enclave is dropped from
+    /// rotation rather than lingering until a future launch succeeds. A launch
+    /// failure is still surfaced to the caller after the list is updated.
     ///
     /// # Arguments
     ///
@@ -142,30 +160,42 @@ impl Enclaves {
         // Get current enclave list from nitro-cli
         let mut enclaves = self.describe_enclaves().await?;
 
-        // Launch additional enclaves if needed
+        // Launch additional enclaves if needed. A launch failure is recorded
+        // but does not short-circuit the routing-list update below, so a
+        // crashed enclave is still dropped from rotation this cycle.
+        let mut launch_outcome = Ok(());
         if !skip_run_enclaves {
-            // saturating_sub: if somehow more enclaves are already running than
-            // MAX_ENCLAVES_PER_INSTANCE (shouldn't happen, but the lint won't
-            // assume that), we just launch zero.
-            let delta = MAX_ENCLAVES_PER_INSTANCE.saturating_sub(enclaves.len());
+            let delta = enclaves_to_launch(&enclaves);
             if delta > 0 {
                 tracing::debug!("[parent] launching {} enclaves", delta);
                 for _ in 0..delta {
-                    self.run_enclave().await?;
+                    if let Err(e) = self.run_enclave().await {
+                        tracing::error!("[parent] failed to launch enclave: {:?}", e);
+                        launch_outcome = Err(e);
+                        break;
+                    }
                 }
-                // Re-query so freshly launched enclaves are reflected in the stored list.
-                enclaves = self.describe_enclaves().await?;
+                // Re-query only after a fully successful launch so freshly
+                // launched enclaves are reflected. On failure we keep the
+                // pre-launch snapshot, which still carries enough state for the
+                // filter below to drop the crashed enclave.
+                if launch_outcome.is_ok() {
+                    enclaves = self.describe_enclaves().await?;
+                }
             }
         } else {
             tracing::warn!("[parent] skipping launching enclaves");
         }
 
-        // Filter and store only running vault enclaves
-        let mut enclaves_writer = self.enclaves.write().await;
-        enclaves_writer.clear();
-        enclaves_writer.extend(enclaves.into_iter().filter(is_runnable_enclave));
+        // Filter and store only running vault enclaves. Runs regardless of the
+        // launch outcome so TERMINATING enclaves leave the routing rotation.
+        {
+            let mut enclaves_writer = self.enclaves.write().await;
+            enclaves_writer.clear();
+            enclaves_writer.extend(enclaves.into_iter().filter(is_runnable_enclave));
+        }
 
-        Ok(())
+        launch_outcome
     }
 
     /// Launches a new Nitro Enclave.
@@ -342,6 +372,39 @@ mod tests {
         let mut nameless = describe_info("ignored", ENCLAVE_STATE_RUNNING);
         nameless.enclave_name = None;
         assert!(!is_runnable_enclave(&nameless));
+    }
+
+    #[test]
+    fn test_enclaves_to_launch_excludes_terminating() {
+        // The bug (#40): one RUNNING + one TERMINATING vault enclave fills the
+        // raw count to MAX, but only one is routable, so a replacement must
+        // launch. The old `enclaves.len()` logic returned 0 here.
+        let enclaves = vec![
+            describe_info(&format!("{ENCLAVE_PREFIX}-1"), ENCLAVE_STATE_RUNNING),
+            describe_info(&format!("{ENCLAVE_PREFIX}-2"), "TERMINATING"),
+        ];
+        assert_eq!(enclaves_to_launch(&enclaves), 1);
+    }
+
+    #[test]
+    fn test_enclaves_to_launch_at_capacity() {
+        let enclaves = vec![
+            describe_info(&format!("{ENCLAVE_PREFIX}-1"), ENCLAVE_STATE_RUNNING),
+            describe_info(&format!("{ENCLAVE_PREFIX}-2"), ENCLAVE_STATE_RUNNING),
+        ];
+        assert_eq!(enclaves_to_launch(&enclaves), 0);
+    }
+
+    #[test]
+    fn test_enclaves_to_launch_empty() {
+        assert_eq!(enclaves_to_launch(&[]), MAX_ENCLAVES_PER_INSTANCE);
+    }
+
+    #[test]
+    fn test_enclaves_to_launch_ignores_non_vault_enclaves() {
+        // A RUNNING enclave with a different prefix is not part of our pool.
+        let enclaves = vec![describe_info("other-enclave", ENCLAVE_STATE_RUNNING)];
+        assert_eq!(enclaves_to_launch(&enclaves), MAX_ENCLAVES_PER_INSTANCE);
     }
 
     #[test]
