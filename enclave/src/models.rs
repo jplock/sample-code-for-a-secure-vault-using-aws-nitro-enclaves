@@ -144,7 +144,7 @@ pub fn decrypt_fields(req: &EnclaveRequest) -> Result<(HashMap<String, Value>, V
     // Sensitive context — debug builds only.
     #[cfg(debug_assertions)]
     {
-        println!("[enclave] vault_id: {:?}", &req.request.vault_id);
+        println!("[enclave] vault_id: {:?}", req.request.vault_id);
     }
 
     // Sequential fast path for single-field requests: rayon's work-

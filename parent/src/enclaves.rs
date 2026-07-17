@@ -139,10 +139,11 @@ impl Enclaves {
     /// 4. Filters and stores only enclaves matching [`ENCLAVE_PREFIX`] that are
     ///    in the [`ENCLAVE_STATE_RUNNING`] state
     ///
-    /// The routing list (step 4) is always refreshed from the latest describe
-    /// output whenever the initial describe succeeds — even if a replacement
-    /// launch fails — so a crashed (`TERMINATING`) enclave is dropped from
-    /// rotation rather than lingering until a future launch succeeds. A launch
+    /// The routing list (step 4) is always refreshed whenever the initial
+    /// describe succeeds — even if a replacement launch or the post-launch
+    /// re-query fails, in which case the pre-launch snapshot is used — so a
+    /// crashed (`TERMINATING`) enclave is dropped from rotation rather than
+    /// lingering until a future refresh succeeds. Any launch or re-query
     /// failure is still surfaced to the caller after the list is updated.
     ///
     /// # Arguments
@@ -176,11 +177,22 @@ impl Enclaves {
                     }
                 }
                 // Re-query only after a fully successful launch so freshly
-                // launched enclaves are reflected. On failure we keep the
-                // pre-launch snapshot, which still carries enough state for the
-                // filter below to drop the crashed enclave.
+                // launched enclaves are reflected. If the launch or the
+                // re-query fails we keep the pre-launch snapshot, which still
+                // carries enough state for the filter below to drop the
+                // crashed enclave; the error is surfaced after the routing
+                // list is updated.
                 if launch_outcome.is_ok() {
-                    enclaves = self.describe_enclaves().await?;
+                    match self.describe_enclaves().await {
+                        Ok(latest) => enclaves = latest,
+                        Err(e) => {
+                            tracing::error!(
+                                "[parent] post-launch describe-enclaves failed: {:?}",
+                                e
+                            );
+                            launch_outcome = Err(e);
+                        }
+                    }
                 }
             }
         } else {

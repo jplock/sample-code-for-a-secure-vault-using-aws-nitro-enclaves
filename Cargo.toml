@@ -13,7 +13,7 @@ resolver = "2"
 # while enclave/parent stay on the original Amazon attribution.
 [workspace.package]
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97.1"
 license = "MIT-0"
 publish = false
 
@@ -69,7 +69,7 @@ print_stderr = "deny"
 # features; each member crate declares the features it actually needs.
 # Versions cannot drift across crates this way.
 [workspace.dependencies]
-anyhow = { version = "=1.0.100", default-features = false }
+anyhow = { version = "=1.0.103", default-features = false }
 aws-config = { version = "=1.8.12", default-features = false }
 aws-credential-types = { version = "=1.2.11", default-features = false }
 aws-lc-rs = { version = "=1.17.0", default-features = false }
