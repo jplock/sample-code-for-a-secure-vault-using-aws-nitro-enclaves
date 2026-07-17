@@ -141,28 +141,36 @@ struct CachedClient {
 static KMS_WORKER: OnceLock<SyncSender<KmsRequest>> = OnceLock::new();
 
 #[cfg(target_env = "musl")]
-fn kms_worker() -> &'static SyncSender<KmsRequest> {
-    KMS_WORKER.get_or_init(|| {
-        let (tx, rx) = mpsc::sync_channel::<KmsRequest>(KMS_WORKER_QUEUE);
-        thread::Builder::new()
-            .name("kms-worker".into())
-            .spawn(move || {
-                // Cache lives entirely within this thread; raw FFI
-                // pointers never escape.
-                let mut cached: Option<CachedClient> = None;
-                while let Ok(req) = rx.recv() {
-                    let result = handle_kms_request(&mut cached, &req);
-                    // If the caller already timed out the response
-                    // channel is dropped — `send` returns Err; ignore.
-                    let _ = req.response_tx.send(result);
-                }
-                // The receiver closes when the OnceLock-owned sender
-                // is dropped; at that point the process is shutting
-                // down and the worker exits.
-            })
-            .ok();
-        tx
-    })
+fn kms_worker() -> Result<&'static SyncSender<KmsRequest>, Error> {
+    if let Some(tx) = KMS_WORKER.get() {
+        return Ok(tx);
+    }
+    let (tx, rx) = mpsc::sync_channel::<KmsRequest>(KMS_WORKER_QUEUE);
+    thread::Builder::new()
+        .name("kms-worker".into())
+        .spawn(move || {
+            // Cache lives entirely within this thread; raw FFI
+            // pointers never escape.
+            let mut cached: Option<CachedClient> = None;
+            while let Ok(req) = rx.recv() {
+                let result = handle_kms_request(&mut cached, &req);
+                // If the caller already timed out the response
+                // channel is dropped — `send` returns Err; ignore.
+                let _ = req.response_tx.send(result);
+            }
+            // `recv()` errors once every sender is dropped: either
+            // this thread lost the OnceLock race below (its sender
+            // was discarded) or the process is shutting down. Exit
+            // cleanly either way.
+        })
+        .map_err(|_| Error::SdkKmsWorkerError)?;
+    // Spawn succeeded; publish the sender. A spawn failure returns Err
+    // WITHOUT caching anything, so the next call retries instead of
+    // holding a permanently dead sender. If two threads race past the
+    // `get()` above, `get_or_init` keeps one winner's sender and drops
+    // the loser's, which terminates the redundant worker via the
+    // `recv()` error above.
+    Ok(KMS_WORKER.get_or_init(|| tx))
 }
 
 #[cfg(target_env = "musl")]
@@ -205,6 +213,8 @@ pub enum Error {
     SdkKmsClientError,
     /// KMS decrypt operation failed
     SdkKmsDecryptError,
+    /// KMS worker thread could not be spawned or has exited
+    SdkKmsWorkerError,
 }
 
 impl fmt::Display for Error {
@@ -215,6 +225,7 @@ impl fmt::Display for Error {
             Error::SdkKmsConfigError => write!(f, "Failed to configure KMS client"),
             Error::SdkKmsClientError => write!(f, "Failed to create KMS client"),
             Error::SdkKmsDecryptError => write!(f, "KMS decrypt operation failed"),
+            Error::SdkKmsWorkerError => write!(f, "KMS worker thread unavailable"),
         }
     }
 }
@@ -372,10 +383,11 @@ pub fn kms_decrypt(
     // Bounded sync send: if the worker queue is full (>KMS_WORKER_QUEUE
     // requests in flight), the caller waits its turn instead of growing
     // the queue without bound.
-    if kms_worker().send(req).is_err() {
-        // Worker thread died; only happens if the worker panicked, which
-        // with panic=abort means the whole process aborts anyway.
-        return Err(Error::SdkKmsClientError);
+    if kms_worker()?.send(req).is_err() {
+        // The published worker owns its receiver for the process
+        // lifetime, so a send failure means the worker thread exited
+        // abnormally. Fail closed rather than hang.
+        return Err(Error::SdkKmsWorkerError);
     }
 
     match response_rx.recv_timeout(KMS_REQUEST_TIMEOUT) {
@@ -571,6 +583,7 @@ mod tests {
             Error::SdkKmsConfigError,
             Error::SdkKmsClientError,
             Error::SdkKmsDecryptError,
+            Error::SdkKmsWorkerError,
         ];
 
         let expected_messages = [
@@ -579,6 +592,7 @@ mod tests {
             "Failed to configure KMS client",
             "Failed to create KMS client",
             "KMS decrypt operation failed",
+            "KMS worker thread unavailable",
         ];
 
         for (error, expected_msg) in errors.iter().zip(expected_messages.iter()) {
@@ -669,6 +683,10 @@ mod tests {
         assert_eq!(
             Error::SdkKmsDecryptError.to_string(),
             "KMS decrypt operation failed"
+        );
+        assert_eq!(
+            Error::SdkKmsWorkerError.to_string(),
+            "KMS worker thread unavailable"
         );
     }
 }
