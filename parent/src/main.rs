@@ -32,7 +32,7 @@ async fn main() -> Result<(), Error> {
     // get configuration options from environment variables
     let options = ParentOptions::parse();
 
-    tracing::info!("[parent] {:?}", &options);
+    tracing::info!("[parent] {:?}", options);
 
     let enclaves = Arc::new(Enclaves::new());
 
