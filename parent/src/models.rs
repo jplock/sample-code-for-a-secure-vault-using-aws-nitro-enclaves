@@ -4,7 +4,7 @@
 //! Data models and validation for parent vault requests and responses.
 //!
 //! This module defines the core data structures used for:
-//! - Enclave management (describe, run, terminate)
+//! - Enclave management (describe, run)
 //! - Decrypt request/response handling
 //! - AWS credential passing
 //!
@@ -91,21 +91,6 @@ pub struct EnclaveRunInfo {
     #[serde(rename = "MemoryMiB")]
     /// The memory provided to the enclave (in MiB).
     pub memory_mib: u64,
-}
-
-/// The information to be provided for a `terminate-enclave` request.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct EnclaveTerminateInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "EnclaveName")]
-    /// The name of the enclave. Optional for older versions.
-    pub enclave_name: Option<String>,
-    #[serde(rename = "EnclaveID")]
-    /// The full ID of the enclave.
-    pub enclave_id: String,
-    #[serde(rename = "Terminated")]
-    /// A flag indicating if the enclave has terminated.
-    pub terminated: bool,
 }
 
 /// The information to be provided for a `build-enclave` request.
