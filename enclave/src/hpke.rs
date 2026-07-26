@@ -85,9 +85,8 @@ pub fn decrypt_value(
 mod tests {
     use super::*;
     use crate::models::SuiteExt;
-    use crate::utils::base64_decode;
     use aws_lc_rs::{encoding::AsBigEndian, signature::EcdsaKeyPair};
-    use data_encoding::HEXLOWER;
+    use data_encoding::{BASE64, HEXLOWER};
     use serde_json::json;
     use vault_protocol::Suite;
 
@@ -97,7 +96,7 @@ mod tests {
         let suite = Suite::P384;
 
         let b64_sk = "MIG/AgEAMBAGByqGSM49AgEGBSuBBAAiBIGnMIGkAgEBBDCt+Ad+qIiVIK4e/tj6u+boZ63IAgT2ZttR14ZGjL3XLjNC//WNJcFyNSOGDt2kNE+gBwYFK4EEACKhZANiAASMfDcAvCD3J8in7EzaM6hNvkQD+S6C0H2hI7biRlkHMXcIjZ/7LVNQ2+VMlFAWV8ESbahT0wKiYLNreDvPIDFJOZyzfURR/HTRtf5Vd+aEjXl9EI7XxRu6OILEfQC9afg=";
-        let der_sk = base64_decode(b64_sk).unwrap();
+        let der_sk = BASE64.decode(b64_sk.as_bytes()).unwrap();
 
         let algo = suite.signing_algorithm();
         let sk = EcdsaKeyPair::from_private_key_der(algo, &der_sk).unwrap();
