@@ -22,7 +22,6 @@ use serde_json::json;
 /// | Variant | Status Code |
 /// |---------|-------------|
 /// | `RunError` | 500 Internal Server Error |
-/// | `ExecError` | 500 Internal Server Error |
 /// | `EnclaveNotFound` | 404 Not Found |
 /// | `DecryptError` | 500 Internal Server Error |
 /// | `InternalServerError` | 500 Internal Server Error |
@@ -35,10 +34,6 @@ pub enum AppError {
     /// Contains the optional exit code and stderr output.
     #[error("error running command: {0:?} {1}")]
     RunError(Option<i32>, String),
-
-    /// Error returned when a subprocess cannot be executed at all.
-    #[error("error executing command")]
-    ExecError,
 
     /// Error returned when no running enclaves are available to process a request.
     #[error("enclave not found")]
@@ -73,7 +68,6 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::RunError(_, _) => (StatusCode::INTERNAL_SERVER_ERROR, "Run error".to_string()),
-            Self::ExecError => (StatusCode::INTERNAL_SERVER_ERROR, "Exec error".to_string()),
             Self::EnclaveNotFound => (StatusCode::NOT_FOUND, "No enclaves found".to_string()),
             Self::DecryptError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -167,7 +161,6 @@ mod tests {
         prop_oneof![
             (any::<Option<i32>>(), any::<String>())
                 .prop_map(|(code, msg)| AppError::RunError(code, msg)),
-            Just(AppError::ExecError),
             Just(AppError::EnclaveNotFound),
             Just(AppError::DecryptError),
             Just(AppError::InternalServerError),
@@ -188,7 +181,6 @@ mod tests {
             // Get the expected status code before consuming the error
             let expected_status = match &error {
                 AppError::RunError(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
-                AppError::ExecError => StatusCode::INTERNAL_SERVER_ERROR,
                 AppError::EnclaveNotFound => StatusCode::NOT_FOUND,
                 AppError::DecryptError => StatusCode::INTERNAL_SERVER_ERROR,
                 AppError::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
@@ -227,14 +219,6 @@ mod tests {
     fn test_run_error_status_code() {
         let err = AppError::RunError(Some(1), "command failed".to_string());
         assert_eq!(get_status(err), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn test_exec_error_status_code() {
-        assert_eq!(
-            get_status(AppError::ExecError),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
     }
 
     #[test]
@@ -311,8 +295,6 @@ mod tests {
 
     #[test]
     fn test_app_error_equality() {
-        assert_eq!(AppError::ExecError, AppError::ExecError);
-        assert_ne!(AppError::ExecError, AppError::EnclaveNotFound);
         assert_eq!(
             AppError::ValidationError("msg".to_string()),
             AppError::ValidationError("msg".to_string())
