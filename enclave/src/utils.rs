@@ -1,8 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-use anyhow::{Error, Result, anyhow};
-use data_encoding::BASE64;
+use anyhow::Error;
 
 /// Maximum byte length for error messages that cross the vsock boundary.
 const MAX_ERROR_MSG_LEN: usize = 200;
@@ -25,13 +24,6 @@ pub fn sanitize_error_message(err: &Error) -> String {
     } else {
         msg
     }
-}
-
-pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
-    let decoded = BASE64
-        .decode(input.as_bytes())
-        .map_err(|err| anyhow!("unable to base64 decode input: {:?}", err))?;
-    Ok(decoded)
 }
 
 #[cfg(test)]
@@ -85,19 +77,5 @@ mod tests {
         assert!(result.ends_with("... (truncated)"));
         // The result must be valid UTF-8 ending on a char boundary
         assert!(result.is_char_boundary(result.len()));
-    }
-
-    #[test]
-    fn test_base64_decode() {
-        // Round-trip a small base64 value through base64_decode.
-        let input = "SGVsbG8="; // "Hello"
-        let actual = base64_decode(input).unwrap();
-        assert_eq!(actual, b"Hello");
-    }
-
-    #[test]
-    fn test_base64_decode_invalid_input() {
-        let result = base64_decode("not!valid!base64!");
-        assert!(result.is_err());
     }
 }
