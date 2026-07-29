@@ -116,17 +116,6 @@ pub enum Suite {
     P521,
 }
 
-impl Suite {
-    /// Encapsulated-key size in bytes for this suite (RFC 9180 Nenc).
-    pub const fn encapped_key_size(self) -> usize {
-        match self {
-            Suite::P256 => 65,
-            Suite::P384 => 97,
-            Suite::P521 => 133,
-        }
-    }
-}
-
 /// One HPKE-encrypted per-field value. Both halves are raw bytes; the
 /// API sends them as CBOR `bstr` values so they arrive here without any
 /// hex/base64 encoding.
