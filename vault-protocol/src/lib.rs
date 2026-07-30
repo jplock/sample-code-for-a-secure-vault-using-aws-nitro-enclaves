@@ -74,6 +74,18 @@ pub const MAX_FRAME_BODY_SIZE: u32 = 10 * 1024 * 1024;
 /// HPKE decryption.
 pub const MAX_FIELD_CIPHERTEXT_SIZE: usize = 64 * 1024;
 
+/// Maximum decoded encapped-key size per field (256 bytes). Per RFC 9180,
+/// legitimate DHKEM encapped keys are a single uncompressed EC point:
+/// 65 bytes (P-256), 97 bytes (P-384), or 133 bytes (P-521). 256 bytes
+/// covers every supported KEM with ~2x headroom while bounding
+/// attacker-controlled per-field allocation ahead of the HPKE layer.
+///
+/// Enforced on both sides as defense in depth, mirroring
+/// [`MAX_FIELD_CIPHERTEXT_SIZE`]: the parent rejects oversize keys when
+/// translating the API request, and the enclave re-checks before
+/// `EncapsulatedSecret::clone` and HPKE decryption.
+pub const MAX_ENCAPPED_KEY_SIZE: usize = 256;
+
 const HEADER_LEN: usize = 6;
 const HEADER_VERSION_OFFSET: usize = 0;
 const HEADER_TYPE_OFFSET: usize = 1;

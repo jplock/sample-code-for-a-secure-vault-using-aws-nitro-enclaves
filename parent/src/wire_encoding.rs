@@ -11,14 +11,15 @@
 //!
 //! Translation to the enclave wire shape is essentially a move plus
 //! mapping the 10-byte suite identifier to the typed [`Suite`] enum
-//! and injecting IMDS credentials. Per-field ciphertext is capped at
+//! and injecting IMDS credentials. Per-field encapped keys are capped
+//! at [`vault_protocol::MAX_ENCAPPED_KEY_SIZE`] and ciphertext at
 //! [`vault_protocol::MAX_FIELD_CIPHERTEXT_SIZE`]; the enclave re-checks
-//! as defense in depth.
+//! both as defense in depth.
 
 use anyhow::{Result, bail};
 use std::collections::HashMap;
 use vault_protocol::{
-    Credential, EnclaveRequest, EncryptedField, MAX_FIELD_CIPHERTEXT_SIZE,
+    Credential, EnclaveRequest, EncryptedField, MAX_ENCAPPED_KEY_SIZE, MAX_FIELD_CIPHERTEXT_SIZE,
     ParentRequest as WireParentRequest, Suite,
 };
 
@@ -44,8 +45,8 @@ pub fn suite_from_bytes(bytes: &[u8]) -> Result<Suite> {
 
 /// Translate an API `ParentRequest` plus IMDS credentials into the
 /// `vault_protocol::EnclaveRequest` the enclave reads. Per-field
-/// ciphertext caps are re-checked here as defense in depth — the
-/// enclave checks them again on the vsock side.
+/// encapped-key and ciphertext caps are re-checked here as defense in
+/// depth — the enclave checks them again on the vsock side.
 pub fn build_enclave_request(
     api_req: ParentRequest,
     credential: Credential,
@@ -54,6 +55,14 @@ pub fn build_enclave_request(
 
     let mut fields: HashMap<String, EncryptedField> = HashMap::with_capacity(api_req.fields.len());
     for (name, ef) in api_req.fields {
+        if ef.encapped_key.len() > MAX_ENCAPPED_KEY_SIZE {
+            bail!(
+                "field '{}': encapped_key size {} exceeds maximum {}",
+                name,
+                ef.encapped_key.len(),
+                MAX_ENCAPPED_KEY_SIZE
+            );
+        }
         if ef.ciphertext.len() > MAX_FIELD_CIPHERTEXT_SIZE {
             bail!(
                 "field '{}': ciphertext size {} exceeds maximum {}",
@@ -219,6 +228,36 @@ mod tests {
     }
 
     #[test]
+    fn build_enclave_request_rejects_oversize_encapped_key() {
+        use std::collections::BTreeMap;
+        let mut fields: BTreeMap<String, EncryptedField> = BTreeMap::new();
+        fields.insert(
+            "field".to_string(),
+            EncryptedField {
+                encapped_key: vec![0xABu8; MAX_ENCAPPED_KEY_SIZE + 1],
+                ciphertext: vec![0xCDu8; 32],
+            },
+        );
+        let req = ParentRequest {
+            vault_id: "v_test".to_string(),
+            region: "us-east-1".to_string(),
+            fields,
+            suite_id: SUITE_ID_P384.to_vec(),
+            encrypted_private_key: vec![0xEFu8; 32],
+            expressions: None,
+        };
+        let cred = Credential::new("AKIA".into(), "SECRET".into(), "TOKEN".into());
+        let err = build_enclave_request(req, cred).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("encapped_key"), "got: {msg}");
+        assert!(msg.contains("exceeds maximum"), "got: {msg}");
+        assert!(
+            msg.contains(&MAX_ENCAPPED_KEY_SIZE.to_string()),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
     fn build_enclave_request_rejects_oversize_ciphertext() {
         use std::collections::BTreeMap;
         let mut fields: BTreeMap<String, EncryptedField> = BTreeMap::new();
@@ -239,6 +278,35 @@ mod tests {
         };
         let cred = Credential::new("AKIA".into(), "SECRET".into(), "TOKEN".into());
         let err = build_enclave_request(req, cred).unwrap_err();
-        assert!(err.to_string().contains("exceeds maximum"));
+        let msg = err.to_string();
+        assert!(msg.contains("ciphertext"), "got: {msg}");
+        assert!(msg.contains("exceeds maximum"), "got: {msg}");
+    }
+
+    /// At-cap encapped key and ciphertext must both be accepted; the
+    /// bounds are inclusive of the limit. Confirms legitimate RFC 9180
+    /// encapped keys (65–133 bytes) pass with headroom.
+    #[test]
+    fn build_enclave_request_accepts_at_cap_field_sizes() {
+        use std::collections::BTreeMap;
+        let mut fields: BTreeMap<String, EncryptedField> = BTreeMap::new();
+        fields.insert(
+            "field".to_string(),
+            EncryptedField {
+                encapped_key: vec![0xABu8; MAX_ENCAPPED_KEY_SIZE],
+                ciphertext: vec![0xCDu8; MAX_FIELD_CIPHERTEXT_SIZE],
+            },
+        );
+        let req = ParentRequest {
+            vault_id: "v_test".to_string(),
+            region: "us-east-1".to_string(),
+            fields,
+            suite_id: SUITE_ID_P384.to_vec(),
+            encrypted_private_key: vec![0xEFu8; 32],
+            expressions: None,
+        };
+        let cred = Credential::new("AKIA".into(), "SECRET".into(), "TOKEN".into());
+        let enc_req = build_enclave_request(req, cred).unwrap();
+        assert_eq!(enc_req.request.fields.len(), 1);
     }
 }

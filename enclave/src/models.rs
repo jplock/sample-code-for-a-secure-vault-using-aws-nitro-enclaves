@@ -37,7 +37,9 @@ use rustls::crypto::aws_lc_rs::hpke::{
 };
 use rustls::crypto::hpke::Hpke;
 use serde_json::Value;
-use vault_protocol::{EnclaveRequest, EncryptedField, MAX_FIELD_CIPHERTEXT_SIZE, Suite};
+use vault_protocol::{
+    EnclaveRequest, EncryptedField, MAX_ENCAPPED_KEY_SIZE, MAX_FIELD_CIPHERTEXT_SIZE, Suite,
+};
 
 use crate::constants::MAX_FIELDS;
 use crate::hpke::decrypt_value;
@@ -77,10 +79,19 @@ fn validate_field_count(count: usize) -> Result<()> {
     Ok(())
 }
 
-/// Rejects per-field ciphertext blobs whose decoded size exceeds the cap.
-/// The parent enforces the same bound at the API boundary; this is the
-/// enclave's defense-in-depth check.
-fn validate_field_ciphertext(field: &str, ef: &EncryptedField) -> Result<()> {
+/// Rejects per-field encapped keys and ciphertext blobs whose decoded
+/// sizes exceed their respective caps. The parent enforces the same
+/// bounds at the API boundary; this is the enclave's defense-in-depth
+/// check, run before `EncapsulatedSecret::clone` and HPKE decryption.
+fn validate_field(field: &str, ef: &EncryptedField) -> Result<()> {
+    if ef.encapped_key.len() > MAX_ENCAPPED_KEY_SIZE {
+        bail!(
+            "encapped_key for field '{}' size {} exceeds maximum {}",
+            field,
+            ef.encapped_key.len(),
+            MAX_ENCAPPED_KEY_SIZE
+        );
+    }
     if ef.ciphertext.len() > MAX_FIELD_CIPHERTEXT_SIZE {
         bail!(
             "ciphertext for field '{}' size {} exceeds maximum {}",
@@ -116,7 +127,7 @@ pub fn validate_request(req: &EnclaveRequest) -> Result<()> {
     }
     validate_field_count(req.request.fields.len())?;
     for (field, ef) in &req.request.fields {
-        validate_field_ciphertext(field, ef)?;
+        validate_field(field, ef)?;
     }
     Ok(())
 }
@@ -228,12 +239,26 @@ mod tests {
     }
 
     #[test]
-    fn validate_field_ciphertext_at_cap_is_ok() {
+    fn validate_field_at_caps_is_ok() {
         let ef = EncryptedField {
-            encapped_key: vec![0xAB; 97],
+            encapped_key: vec![0xAB; MAX_ENCAPPED_KEY_SIZE],
             ciphertext: vec![0xCD; MAX_FIELD_CIPHERTEXT_SIZE],
         };
-        assert!(validate_field_ciphertext("ssn", &ef).is_ok());
+        assert!(validate_field("ssn", &ef).is_ok());
+    }
+
+    #[test]
+    fn validate_field_encapped_key_over_cap_errors() {
+        let ef = EncryptedField {
+            encapped_key: vec![0xAB; MAX_ENCAPPED_KEY_SIZE + 1],
+            ciphertext: vec![0xCD; 32],
+        };
+        let result = validate_field("ssn", &ef);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("encapped_key for field 'ssn'"));
+        assert!(msg.contains("exceeds maximum"));
+        assert!(msg.contains(&MAX_ENCAPPED_KEY_SIZE.to_string()));
     }
 
     #[test]
@@ -242,7 +267,7 @@ mod tests {
             encapped_key: vec![0xAB; 97],
             ciphertext: vec![0xCD; MAX_FIELD_CIPHERTEXT_SIZE + 1],
         };
-        let result = validate_field_ciphertext("ssn", &ef);
+        let result = validate_field("ssn", &ef);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("ciphertext for field 'ssn'"));
