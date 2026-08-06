@@ -10,10 +10,6 @@
 //! | GET | `/health` | [`health`] | Health check endpoint |
 //! | GET | `/enclaves` | [`get_enclaves`] | List running enclaves |
 //! | POST | `/decrypt` | [`decrypt`] | Decrypt vault fields |
-//!
-//! Additional endpoints (currently disabled):
-//! - POST `/enclaves` - Launch a new enclave
-//! - GET `/creds` - Get current IAM credentials
 
 use std::sync::Arc;
 
@@ -21,7 +17,7 @@ use crate::application::AppState;
 use crate::cbor::Cbor;
 use crate::constants;
 use crate::errors::AppError;
-use crate::models::{EnclaveDescribeInfo, EnclaveRunInfo, ParentRequest, ParentResponse};
+use crate::models::{EnclaveDescribeInfo, ParentRequest, ParentResponse};
 use crate::wire_encoding::build_enclave_request;
 
 use axum::Json;
@@ -58,22 +54,6 @@ pub async fn get_enclaves(
     let enclaves = state.enclaves.get_enclaves().await;
 
     Ok(Json(enclaves))
-}
-
-/// Launches a new Nitro Enclave.
-///
-/// This endpoint is currently disabled in the router configuration.
-///
-/// # Response
-///
-/// Returns [`EnclaveRunInfo`] on success.
-#[tracing::instrument(skip(state))]
-pub async fn run_enclave(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<EnclaveRunInfo>, AppError> {
-    let run_info = state.enclaves.run_enclave().await?;
-
-    Ok(Json(run_info))
 }
 
 // The `/creds` route handler that previously returned IAM credentials
