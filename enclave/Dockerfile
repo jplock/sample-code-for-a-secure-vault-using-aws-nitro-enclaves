@@ -137,10 +137,15 @@ RUN cmake --build json-c/build --parallel $(nproc) --target install
 # NSM LIB
 RUN git clone --depth 1 -b v0.4.0 "https://github.com/aws/aws-nitro-enclaves-nsm-api"
 RUN rustup target add $TARGETPLATFORM
+# nsm-lib's build.rs writes nsm.h to OUT_DIR's 3rd ancestor, which no
+# longer resolves to target/<triple>/release under cargo's newer build-dir
+# layout. Locate it instead of hard-coding the path; fail if it's missing.
 RUN cd aws-nitro-enclaves-nsm-api \
     && PATH="$PATH:/root/.cargo/bin" cargo build --release --target $TARGETPLATFORM --jobs $(nproc) -p nsm-lib \
     && mv target/$TARGETPLATFORM/release/libnsm.so /usr/lib/ \
-    && mv target/$TARGETPLATFORM/release/nsm.h /usr/include/
+    && NSM_H="$(find target -name nsm.h -type f -print -quit)" \
+    && test -n "$NSM_H" \
+    && mv "$NSM_H" /usr/include/
 
 # AWS Nitro Enclaves SDK
 RUN git clone --depth 1 -b v0.4.3 "https://github.com/aws/aws-nitro-enclaves-sdk-c"
