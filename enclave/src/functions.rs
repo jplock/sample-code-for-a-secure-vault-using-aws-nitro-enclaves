@@ -8,7 +8,7 @@ use data_encoding::{BASE64, HEXLOWER, HEXLOWER_PERMISSIVE};
 use std::sync::Arc;
 
 // Default functions available:
-// https://github.com/cel-rust/cel-rust/blob/v0.13.0/cel/src/context.rs
+// https://github.com/cel-rust/cel-rust/blob/v0.15.0/cel/src/context.rs
 
 // String Functions
 

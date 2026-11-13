@@ -6,7 +6,7 @@
 ##
 ## based on https://github.com/aws/aws-nitro-enclaves-acm/blob/main/env/enclave/Dockerfile
 ####################################################################################################
-FROM public.ecr.aws/docker/library/rust:1.97.1-alpine@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS kmstool
+FROM public.ecr.aws/docker/library/rust:1.100.0-alpine@sha256:de1e0058543a81ed7b046629167db587c67a94bdf37cce14eb27f0ec83baaffb AS kmstool
 
 ARG TARGETPLATFORM
 ARG SOURCE_DATE_EPOCH

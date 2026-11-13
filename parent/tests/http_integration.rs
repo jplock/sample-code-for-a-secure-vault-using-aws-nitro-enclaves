@@ -27,7 +27,7 @@ fn create_test_server() -> TestServer {
     let options = ParentOptions::default();
     let enclaves = Arc::new(Enclaves::new());
     let app = create_router(options, enclaves);
-    TestServer::new(app).unwrap()
+    TestServer::new(app)
 }
 
 /// Build a CBOR map from `(key, value)` pairs, with text-typed keys.
