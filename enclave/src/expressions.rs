@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Result, anyhow, bail};
 use cel::Value as celValue;
+use cel::extractors::IntoFunction;
 use cel::{Context, ParseErrors, Program};
 use serde_json::Value;
 
@@ -95,6 +96,18 @@ pub fn validate_expressions_count(n: usize) -> Result<()> {
     Ok(())
 }
 
+/// Register a custom CEL function on `context`, surfacing a name collision with
+/// a built-in (or previously registered) overload as an error instead of
+/// silently dropping it.
+fn register<T: 'static, F>(context: &mut Context, name: &str, function: F) -> Result<()>
+where
+    F: IntoFunction<T> + 'static + Send + Sync,
+{
+    context
+        .add_function(name, function)
+        .map_err(|err| anyhow!("Unable to register CEL function '{name}': {err}"))
+}
+
 /// Applies CEL expressions to a set of decrypted fields.
 ///
 /// Returns the transformed field map and a (possibly empty) list of expression
@@ -128,23 +141,23 @@ pub fn execute_expressions(
 
     let mut context = Context::default();
     // strings
-    context.add_function("is_empty", functions::is_empty);
-    context.add_function("to_lowercase", functions::to_lowercase);
-    context.add_function("to_uppercase", functions::to_uppercase);
+    register(&mut context, "is_empty", functions::is_empty)?;
+    register(&mut context, "to_lowercase", functions::to_lowercase)?;
+    register(&mut context, "to_uppercase", functions::to_uppercase)?;
     // base64
-    context.add_function("base64_encode", functions::base64_encode);
-    context.add_function("base64_decode", functions::base64_decode);
+    register(&mut context, "base64_encode", functions::base64_encode)?;
+    register(&mut context, "base64_decode", functions::base64_decode)?;
     // hex
-    context.add_function("hex_encode", functions::hex_encode);
-    context.add_function("hex_decode", functions::hex_decode);
+    register(&mut context, "hex_encode", functions::hex_encode)?;
+    register(&mut context, "hex_decode", functions::hex_decode)?;
     // hmac
-    context.add_function("sha256", functions::sha256_hash);
-    context.add_function("sha384", functions::sha384_hash);
-    context.add_function("sha512", functions::sha512_hash);
+    register(&mut context, "sha256", functions::sha256_hash)?;
+    register(&mut context, "sha384", functions::sha384_hash)?;
+    register(&mut context, "sha512", functions::sha512_hash)?;
     // datetime
-    context.add_function("today_utc", functions::today_utc);
-    context.add_function("date", functions::date);
-    context.add_function("age", functions::age);
+    register(&mut context, "today_utc", functions::today_utc)?;
+    register(&mut context, "date", functions::date)?;
+    register(&mut context, "age", functions::age)?;
 
     let mut transformed: HashMap<String, Value> =
         HashMap::with_capacity(fields.len().saturating_add(expressions.len()));

@@ -6,7 +6,7 @@
 ##
 ## based on https://github.com/aws/aws-nitro-enclaves-acm/blob/main/env/enclave/Dockerfile
 ####################################################################################################
-FROM public.ecr.aws/docker/library/rust:1.97.1-alpine@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900 AS kmstool
+FROM public.ecr.aws/docker/library/rust:1.100.0-alpine@sha256:de1e0058543a81ed7b046629167db587c67a94bdf37cce14eb27f0ec83baaffb AS kmstool
 
 ARG TARGETPLATFORM
 ARG SOURCE_DATE_EPOCH
@@ -137,10 +137,15 @@ RUN cmake --build json-c/build --parallel $(nproc) --target install
 # NSM LIB
 RUN git clone --depth 1 -b v0.4.0 "https://github.com/aws/aws-nitro-enclaves-nsm-api"
 RUN rustup target add $TARGETPLATFORM
+# nsm-lib's build.rs writes nsm.h to OUT_DIR's 3rd ancestor, which no
+# longer resolves to target/<triple>/release under cargo's newer build-dir
+# layout. Locate it instead of hard-coding the path; fail if it's missing.
 RUN cd aws-nitro-enclaves-nsm-api \
     && PATH="$PATH:/root/.cargo/bin" cargo build --release --target $TARGETPLATFORM --jobs $(nproc) -p nsm-lib \
     && mv target/$TARGETPLATFORM/release/libnsm.so /usr/lib/ \
-    && mv target/$TARGETPLATFORM/release/nsm.h /usr/include/
+    && NSM_H="$(find target -name nsm.h -type f -print -quit)" \
+    && test -n "$NSM_H" \
+    && mv "$NSM_H" /usr/include/
 
 # AWS Nitro Enclaves SDK
 RUN git clone --depth 1 -b v0.4.3 "https://github.com/aws/aws-nitro-enclaves-sdk-c"

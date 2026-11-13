@@ -4,18 +4,7 @@
 [advisories]
 version = 2
 yanked = "deny"
-# The `paste` advisory (RUSTSEC-2024-0436) that previously forced an
-# ignore here was carried in via cel-interpreter 0.10.0. The renamed
-# `cel` 0.13.0 crate switched to `pastey`, so the suppression is no
-# longer needed. If a new transitive advisory needs ignoring later,
-# add it here with an explicit reason.
-ignore = [
-  # RUSTSEC-2026-0173: proc-macro-error2 is unmaintained. Pulled in
-  # transitively via validator 0.20.0 -> validator_derive; no validator
-  # release without it exists yet. Compile-time proc-macro helper only,
-  # not linked into runtime code. Re-check when validator updates.
-  "RUSTSEC-2026-0173",
-]
+ignore = []
 
 [licenses]
 version = 2
