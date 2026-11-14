@@ -2,9 +2,12 @@ name: Lockdown untrusted workflows
 
 # PROCESS
 #
-# 1. Scans for any external GitHub Action being used without version pinning (@<commit-sha> vs @v3)
-# 2. Scans for insecure practices for inline bash scripts (shellcheck)
-# 3. Fail CI and prevent PRs to be merged if any malpractice is found
+# 1. Verifies .github/workflows/actions.lock is in sync with the workflows and that every
+#    locked action commit still resolves upstream (https://gh.io/actions-lockfile)
+# 2. Fail CI and prevent PRs to be merged if the lockfile is stale or a pin no longer verifies
+#
+# After adding or changing any `uses:` reference, run `gh actions-lock` locally and commit
+# the updated lockfile.
 
 # USAGE
 #
@@ -22,12 +25,18 @@ permissions:
   contents: read
 
 jobs:
-  enforce_pinned_workflows:
-    name: Harden Security
+  lockfile:
+    name: Verify actions lockfile
     if: contains(fromJson('["aws-samples", "jplock"]'), github.repository_owner)
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
-      - name: Ensure 3rd party workflows have SHA pinned
-        uses: zgosalvez/github-actions-ensure-sha-pinned-actions@6124774845927d14c601359ab8138699fa5b70c3 # v4.0.1
+        with:
+          persist-credentials: false
+      - name: Install gh-actions-lock
+        run: gh extension install github/gh-actions-lock --pin v0.4.1
+      - name: Verify actions lockfile
+        run: gh actions-lock --verify
