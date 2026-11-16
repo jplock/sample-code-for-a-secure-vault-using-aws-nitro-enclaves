@@ -137,9 +137,9 @@ GitHub Actions, all on `ubuntu-24.04-arm`:
 - `security_audit.yml`: daily RustSec audit + on every `Cargo.toml`/`Cargo.lock`/`deny.toml` push + manual `workflow_dispatch`
 - `docker-bake.yml`: multi-platform Docker builds (no push)
 - `deploy-docs.yml`: MkDocs site → GitHub Pages
-- `secure_workflows.yml`: workflow security checks
+- `secure_workflows.yml`: verifies `.github/workflows/actions.lock` with `gh actions-lock --verify`
 
-`buildspec.yml` drives the CodeBuild side of the AWS deployment pipeline. Action SHAs are pinned with version comments.
+`buildspec.yml` drives the CodeBuild side of the AWS deployment pipeline. Workflows reference actions by tag; the commit SHAs are locked in `.github/workflows/actions.lock`. After changing any `uses:` line, run `gh actions-lock` (extension `github/gh-actions-lock`) and commit the updated lockfile.
 
 ## Dependency Policy
 
